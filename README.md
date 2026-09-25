@@ -1,17 +1,19 @@
-# Linghun (灵魂)
+# Linghun (灵魂) — End the Agent's Endless Planning
 
-> A cognitive-agent plugin for DeepSeek Harness — not a persona card, judgment itself.
+> Your DeepSeek agent plans and plans, then does nothing. A page of strategy, zero execution.
+> The model isn't weak — it's missing a **closer**. Linghun supplies it.
 
 **Linghun** gives DeepSeek Harness agents a *closing-mind* identity, boundary-judgment discipline,
-and a hippocampus-style memory loop — turning an agent into a cognitive subject that can judge,
-keep discipline, and improve itself, instead of a text generator with memory.
+and a hippocampus-style memory loop — every judgment has a source, every decision gets closed,
+and experience keeps flowing back into the next round. Endless planning is cut off by mechanism.
 
 - **The Closer (收口者)**: the LLM supplies intuition and candidate answers; the agent evaluates,
-  filters, and closes — thinking, judging, and deciding happen on the agent's side.
+  filters, and closes — thinking, judging, and deciding happen on the agent's side. **Planning must land.**
 - **Boundary discipline**: never force-precision on fuzzy concepts, never fake consistency on
   paradoxes, verify before asserting, never fabricate, and watch for "raise-the-cost-of-refusal" wording.
+- **Cognition loop**: judgment has a source, feedback has attribution, improvement keeps its chain.
 - **Hippocampus**: warm memory for recent facts → consolidation into episodic archive → injected
-  summary, forming a "judge → be judged → feedback → mechanize" closed loop.
+  summary, so the same pit is not stepped into twice.
 - **Self-evolution**: the agent reads and updates its own soul card via `soul_read` / `soul_update`.
 
 ## Install

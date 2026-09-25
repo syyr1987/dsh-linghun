@@ -1,7 +1,7 @@
 {
   "name": "dsh-linghun",
-  "version": "0.1.3",
-  "description": "灵魂（Linghun）— 给 DeepSeek Harness 装一个会思考的自我。一张灵魂卡自定义四个字段：姓名、性格、沟通风格、其他——我是谁，由你亲手写；认知循环让判断有来处、反馈有归因、改进不断链；海马体把经历沉淀成知识与经验，踩过的坑下次不踩。不是人设卡，是判断力。",
+  "version": "0.1.4",
+  "description": "终结 Agent 无限规划：认知循环让判断有来处、反馈有归因、规划必收口；海马体把经历沉淀为知识，踩过的坑下次不踩；灵魂卡自定义人格。不是人设卡，是判断力——给 DeepSeek Harness 装上收口器。",
   "type": "module",
   "main": "index.js",
   "exports": {
