@@ -1,6 +1,6 @@
 {
   "name": "dsh-linghun",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "description": "终结 Agent 无限规划：认知循环让判断有来处、反馈有归因、规划必收口；海马体把经历沉淀为知识，踩过的坑下次不踩；灵魂卡自定义人格。不是人设卡，是判断力——给 DeepSeek Harness 装上收口器。",
   "type": "module",
   "main": "index.js",

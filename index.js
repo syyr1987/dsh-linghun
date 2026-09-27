@@ -66,6 +66,20 @@ const Config = z.object({
     order: z.number().default(0.5),
     /** warm.md 上限（字节），超出先 consolidate。 */
     maxBytes: z.number().default(1024 * 1024),
+    /** 收尾评估：每轮对话结束由工程强制触发一次「有没有值得沉淀」的 LLM 评估，不依赖模型自觉。 */
+    assessment: z.object({
+      enabled: z.boolean().default(true),
+      /** 送入评估的对话文本上限（字符）。 */
+      maxChars: z.number().default(4000),
+      /** 评估输出上限（token）。 */
+      maxTokens: z.number().default(300),
+      temperature: z.number().default(0.2),
+    }).default({}),
+    /** 阈值自动沉淀：暖态达到 maxBytes*triggerRatio 时自动 consolidate 再写入，模型无感知。 */
+    autoConsolidate: z.object({
+      enabled: z.boolean().default(true),
+      triggerRatio: z.number().default(0.8),
+    }).default({}),
   }),
 });
 
@@ -192,6 +206,15 @@ function apply(ctx, config) {
     },
   });
 
+  // 收尾评估要发起模型调用：先声明 llm 依赖，把服务引用存下来供事件回调使用
+  let llmClient = null;
+  ctx.inject(["llm"], (sctx) => {
+    llmClient = sctx.llm;
+    return () => {
+      llmClient = null;
+    };
+  });
+
   // ── helpers ─────────────────────────────────────────────────────────────
   const ensureParent = async (file) => {
     await mkdir(dirname(file), { recursive: true });
@@ -205,6 +228,51 @@ function apply(ctx, config) {
   const todayName = () => nowStamp().slice(0, 10);
 
   // ── 海马体：记 / 读 / 沉淀 ──────────────────────────────────────────────
+  /** 归档暖态 → episodic/<日期>.md + 冷储摘要，然后清空暖态。工程层可复用（阈值沉淀/收尾评估共用）。 */
+  const doConsolidate = async () => {
+    const warm = layout.readWarm();
+    if (!warm.trim()) return { archived: 0, warmCleared: true };
+    const episodicFile = join(layout.episodicDir(), `${todayName()}.md`);
+    const cold = layout.readCold();
+    const coldNext = [cold.trim(), `## ${todayName()} 沉淀\n\n${warm.trim()}`]
+      .filter(Boolean)
+      .join("\n\n");
+    await ensureParent(episodicFile);
+    await writeFile(episodicFile, warm.trim() + "\n", "utf8");
+    await ensureParent(layout.coldFile());
+    await writeFile(layout.coldFile(), coldNext + "\n", "utf8");
+    await writeFile(layout.warmFile(), "", "utf8");
+    fileCache.delete(episodicFile);
+    fileCache.delete(layout.coldFile());
+    fileCache.delete(layout.warmFile());
+    return { archived: byteLen(warm), warmCleared: true };
+  };
+
+  /** 写一条暖态记忆；开启 autoConsolidate 且达到阈值时先自动归档再写（模型无感知，不 throw）。 */
+  const appendMemoryBlock = async (content, kind) => {
+    const block = `\n## ${nowStamp()} [${kind}]\n\n${content}\n`;
+    const file = layout.warmFile();
+    const current = readCached(file) ?? "";
+    let total = byteLen(current + block);
+    const max = cfg().memory?.maxBytes ?? 1024 * 1024;
+    const ac = cfg().memory?.autoConsolidate;
+    if (ac?.enabled !== false) {
+      const ratio = ac?.triggerRatio ?? 0.8;
+      if (total > max * ratio) {
+        await doConsolidate();
+        const fresh = readCached(file) ?? "";
+        total = byteLen(fresh + block);
+      }
+    }
+    if (total > max) {
+      throw new Error(`memory_append: 记忆超过上限（${max} 字节），先执行 memory_consolidate 沉淀`);
+    }
+    await ensureParent(file);
+    await appendFile(file, block, "utf8");
+    fileCache.delete(file);
+    return { bytes: byteLen(block), totalBytes: total };
+  };
+
   ctx.tools.register(defineTool({
     name: "memory_append",
     description:
@@ -234,18 +302,7 @@ function apply(ctx, config) {
       const content = String(args.content ?? "").trim();
       if (!content) throw new Error("memory_append: `content` 不能为空");
       const kind = String(args.kind ?? "fact").trim() || "fact";
-      const block = `\n## ${nowStamp()} [${kind}]\n\n${content}\n`;
-      const file = layout.warmFile();
-      const current = readCached(file) ?? "";
-      const total = byteLen(current + block);
-      const max = cfg().memory?.maxBytes ?? 1024 * 1024;
-      if (total > max) {
-        throw new Error(`memory_append: 记忆超过上限（${max} 字节），先执行 memory_consolidate 沉淀`);
-      }
-      await ensureParent(file);
-      await appendFile(file, block, "utf8");
-      fileCache.delete(file);
-      return { bytes: byteLen(block), totalBytes: total };
+      return appendMemoryBlock(content, kind);
     },
     presentCall: (args) => ({ card: "generic", title: "海马体·记录", kind: "other", rawInput: args }),
   }));
@@ -328,25 +385,139 @@ function apply(ctx, config) {
     },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
-      const warm = layout.readWarm();
-      if (!warm.trim()) return { archived: 0, warmCleared: true };
-      const episodicFile = join(layout.episodicDir(), `${todayName()}.md`);
-      const cold = layout.readCold();
-      // 冷储摘要：简单合并（机制版；LLM 精炼在 v0.3 引入）
-      const coldNext = [cold.trim(), `## ${todayName()} 沉淀\n\n${warm.trim()}`]
-        .filter(Boolean)
-        .join("\n\n");
-      await ensureParent(episodicFile);
-      await writeFile(episodicFile, warm.trim() + "\n", "utf8");
-      await ensureParent(layout.coldFile());
-      await writeFile(layout.coldFile(), coldNext + "\n", "utf8");
-      await writeFile(layout.warmFile(), "", "utf8");
-      fileCache.delete(episodicFile);
-      fileCache.delete(layout.coldFile());
-      fileCache.delete(layout.warmFile());
-      return { archived: byteLen(warm), warmCleared: true };
+      return doConsolidate();
     },
   }));
+
+  // ── 收尾评估：每轮对话结束由工程强制触发「有没有值得沉淀」──────────────
+  // 记忆的"时机"是基础设施行为，不能赌模型自觉。读已在注入时自动完成；
+  // 写与沉淀在这里由代码保证：turn/end 时评估一次，warm 超阈值时自动归档。
+  let lastModel = { provider: "", model: "" };
+  const ASSESS_SYSTEM =
+    "你是海马体记忆管家。你的任务：阅读一段刚结束的对话，判断其中是否有值得跨会话保留的记忆条目。\n\n" +
+    "值得记的：明确的决策、用户的偏好/身份信息、重要事实、可复用的经验教训。\n" +
+    "不值得记的：日常寒暄、一次性问答、可即时查询的常识、情绪化表达。\n\n" +
+    "输出格式（严格遵守）：\n" +
+    "- 没有值得记的 → 只输出 SKIP\n" +
+    "- 有值得记的 → 输出 1-3 条，每条一行：类别：内容\n" +
+    "  类别 ∈ fact（事实）/ decision（决策）/ preference（偏好）/ experience（经验）\n" +
+    "  内容用简洁自包含的中文短句或短段，不依赖原对话上下文也能读懂。";
+  const collectTurnTranscript = (session) => {
+    const events = session.log ?? session.events ?? [];
+    // 以最后一个 turn/start 为边界，只收集本轮的用户/助手可见消息
+    let turnStartSeq = -1;
+    for (let i = events.length - 1; i >= 0; i--) {
+      if (events[i]?.type === "turn/start") {
+        turnStartSeq = events[i].seq;
+        break;
+      }
+    }
+    const lines = [];
+    const textOf = (ev) => {
+      const blocks =
+        ev.type === "assistant/message"
+          ? ev.data?.message?.content ?? []
+          : ev.data?.content ?? [];
+      return blocks
+        .filter((b) => b.type === "text" && typeof b.text === "string")
+        .map((b) => b.text)
+        .join("\n")
+        .trim();
+    };
+    for (const ev of events) {
+      if (ev.seq < turnStartSeq) continue;
+      if (ev.type === "user/message") {
+        // 跳过运行时上下文注入（runtime context / 系统注入），只保留真实用户消息
+        const src = ev.data?.source;
+        if (src?.kind === "runtime-context" || src?.kind === "model") continue;
+        const t = textOf(ev);
+        if (t) lines.push(`用户：${t}`);
+      } else if (ev.type === "assistant/message") {
+        const t = textOf(ev);
+        if (t) lines.push(`助手：${t}`);
+      }
+    }
+    return lines.join("\n");
+  };
+  const buildAssessmentPrompt = (transcript, warm) => {
+    const cap = cfg().memory?.assessment?.maxChars ?? 4000;
+    const t = transcript.length > cap ? transcript.slice(0, cap) + "\n…(截断)…" : transcript;
+    const w = (warm ?? "").trim();
+    const warmPart = w ? `\n\n【已有记忆】\n${w.slice(0, 2000)}` : "";
+    return `【对话】\n${t}${warmPart}\n\n请判断是否有值得沉淀的条目。`;
+  };
+  const parseAssessment = (text) => {
+    const t = (text ?? "").trim();
+    if (!t || t.toUpperCase().includes("SKIP")) return null;
+    const lines = t
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .filter((l) => !/^[-*•]?\s*(类别|输出|对话|已有)/.test(l));
+    const kinds = new Set(["fact", "decision", "preference", "experience"]);
+    const entries = [];
+    for (const line of lines) {
+      const m = line.match(/^(fact|decision|preference|experience)[：:]\s*(.+)$/i);
+      if (m) {
+        entries.push({ kind: m[1].toLowerCase(), content: m[2].trim() });
+      } else if (line.length > 4 && entries.length === 0) {
+        // 兜底：模型没按格式输出时，整段当一条 fact
+        entries.push({ kind: "fact", content: line });
+      }
+    }
+    return entries.length ? entries[0] : null;
+  };
+  const callLlmText = async (system, prompt) => {
+    const a = cfg().memory?.assessment ?? {};
+    if (!llmClient) return "";
+    let text = "";
+    for await (const chunk of llmClient.stream({
+      provider: lastModel.provider,
+      model: lastModel.model,
+      system,
+      messages: [
+        {
+          id: `linghun-assess-${Date.now()}`,
+          role: "user",
+          content: [{ type: "text", text: prompt }],
+          source: { kind: "plugin", plugin: NS },
+        },
+      ],
+      temperature: a.temperature ?? 0.2,
+      maxTokens: a.maxTokens ?? 300,
+      purpose: "compaction",
+    })) {
+      if (chunk.type === "text-delta") text += chunk.text;
+    }
+    return text.trim();
+  };
+  const runAssessment = async (session) => {
+    try {
+      const c = cfg();
+      if (c.memory?.enabled === false || c.memory?.assessment?.enabled === false) return;
+      if (!lastModel.provider || !lastModel.model) return;
+      const transcript = collectTurnTranscript(session);
+      if (!transcript.trim()) return;
+      const warm = layout.readWarm();
+      const prompt = buildAssessmentPrompt(transcript, warm);
+      const out = await callLlmText(ASSESS_SYSTEM, prompt);
+      const entry = parseAssessment(out);
+      if (!entry) return;
+      await appendMemoryBlock(entry.content, entry.kind);
+    } catch {
+      // best-effort：评估失败静默跳过，绝不阻塞主流程
+    }
+  };
+  ctx.on("session/event", (session, event) => {
+    if (event?.type === "request/header" && event.data?.header?.config) {
+      lastModel = {
+        provider: event.data.header.config.provider ?? "",
+        model: event.data.header.config.model ?? "",
+      };
+    }
+    if (event?.type !== "turn/end") return;
+    void runAssessment(session);
+  });
 
   // ── 灵魂：读 / 更新自己的灵魂卡（自进化）────────────────────────────────
   ctx.tools.register(defineTool({

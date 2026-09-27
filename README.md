@@ -72,11 +72,20 @@ Tools exposed:
 Memory lives in plain Markdown under `$DSH_HOME/linghun/memory/` — readable, searchable, git-friendly.
 The soul card is at `$DSH_HOME/linghun/identity.md` — also plain Markdown. Your persona is yours; edit it however you like.
 
+## Engineering guardrails (v0.2)
+
+Memory *timing* is infrastructure, so it is enforced by code, not by prompting:
+
+- **End-of-turn assessment** — on every `turn/end`, the plugin asks the model once whether the turn produced anything worth keeping (`fact` / `decision` / `preference` / `experience`). Worthwhile entries are appended to warm memory automatically; `SKIP` is emitted when nothing qualifies. This no longer depends on the model remembering to call `memory_append` on its own.
+- **Threshold auto-consolidation** — when warm memory reaches `maxBytes × triggerRatio`, the plugin archives warm → `episodic/<date>.md` and merges the cold summary **before** writing the new entry. The model never hits a full-memory error and never has to schedule consolidation itself.
+
+Both can be tuned under the `linghun.memory.assessment` / `linghun.memory.autoConsolidate` settings (each with an `enabled` switch), e.g. through `cordis.patch.yml`.
+
 ## Roadmap
 
-- **v0.1.0** (current): identity + judgment + hippocampus
-- **v0.2.0**: judging discipline — judge tool (ACCEPT/REJECT/BLINDSPOT/DEFER) + criteria-fingerprint assertion
-- **v0.3.0**: LLM consolidation of hippocampus (checkpoint → episodic → knowledge)
+- **v0.1.0** (done): identity + judgment + hippocampus
+- **v0.2.0** (current): engineering memory guardrails — end-of-turn assessment + threshold auto-consolidation
+- **v0.3.0**: LLM-distilled cold storage (checkpoint → episodic → knowledge with real summarization)
 - **v0.4.0**: dual-instance mutual verification (criteria source bound to the verifier)
 
 ## Design philosophy
