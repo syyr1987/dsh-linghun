@@ -1,19 +1,21 @@
 /**
  * 灵魂（Linghun）— 海马体记忆布局。
  *
- * 暖态工位 + 冷储归档，机制先行：
+ * 暖态工位 + 冷储归档 + 序时账（journal），机制先行：
  *
  *   $DSH_HOME/linghun/memory/
- *   ├── warm.md          # 暖态工位：近期记忆（memory_append 写这里）
+ *   ├── warm.md          # 暖态工位：近期记忆（memory_append 写这里，遗忘梯度）
  *   ├── cold.md          # 冷储摘要：沉淀后的知识/规则（注入时优先读）
- *   └── episodic/        # 冷储归档：YYYY-MM-DD.md（memory_consolidate 时移入）
+ *   ├── episodic/        # 冷储归档：YYYY-MM-DD.md（memory_consolidate 时移入）
+ *   └── journal/         # 序时账：YYYY-MM-DD.md 原始流水（每次对话全量 append，不筛选）
  */
-import { readdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";
 
 export const WARM = "warm.md";
 export const COLD = "cold.md";
 export const EPISODIC_DIR = "episodic";
+export const JOURNAL_DIR = "journal";
 
 /** 解析 warm.md 为条目数组；每条提取 last_access 元数据（无则 null=视为最旧）。 */
 export function parseWarm(text) {
@@ -84,10 +86,42 @@ export function createMemoryLayout(root, readText) {
   const warmFile = () => join(memoryRoot(), WARM);
   const coldFile = () => join(memoryRoot(), COLD);
   const episodicDir = () => join(memoryRoot(), EPISODIC_DIR);
+  const journalDir = () => join(memoryRoot(), JOURNAL_DIR);
 
   const readFile = (file) => {
     const text = readText(file);
     return text === null ? "" : text;
+  };
+
+  /** 序时账：把一轮原始对话 append 到当天 journal（YYYY-MM-DD.md），每条带 HH:MM:SS。
+   *  append 顺序 = 天内先后；全量记录不筛选不评估。 */
+  const appendJournal = (stampSec, text) => {
+    const day = String(stampSec).slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !text?.trim()) return false;
+    const file = join(journalDir(), `${day}.md`);
+    try {
+      mkdirSync(journalDir(), { recursive: true });
+      appendFileSync(file, `\n${stampSec}\n${text.trim()}\n`, "utf8");
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const listJournal = () => {
+    try {
+      return readdirSync(journalDir(), { withFileTypes: true })
+        .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".md"))
+        .sort((a, b) => a.name.localeCompare(b.name, "en"))
+        .map((entry) => {
+          const file = join(journalDir(), entry.name);
+          const text = readText(file);
+          const nBlocks = (text ?? "").split(/\n(?=\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/).filter((b) => b.trim()).length;
+          return { file, name: basename(entry.name, ".md"), entries: nBlocks };
+        });
+    } catch {
+      return [];
+    }
   };
 
   const listEpisodic = () => {
@@ -115,9 +149,16 @@ export function createMemoryLayout(root, readText) {
     warmFile,
     coldFile,
     episodicDir,
+    journalDir,
     readWarm: () => readFile(warmFile()),
     readCold: () => readFile(coldFile()),
     listEpisodic,
+    appendJournal,
+    listJournal,
+    readJournal: (day) => {
+      const file = join(journalDir(), `${day}.md`);
+      return readFile(file);
+    },
 
     /** 注入用渲染：冷储摘要 + 暖态近期记忆 + 归档索引，截断到 maxChars。
      *  opts.timeWeight !== false 时，暖态按 last_access 排序（新在前、吃灰沉底），
@@ -126,6 +167,7 @@ export function createMemoryLayout(root, readText) {
       const cold = readFile(coldFile());
       const warmRaw = readFile(warmFile());
       const episodes = listEpisodic();
+      const journals = listJournal();
       let warm = warmRaw;
       if (opts.timeWeight !== false && warmRaw.trim()) {
         const entries = sortWarmByAccess(parseWarm(warmRaw));
@@ -139,6 +181,10 @@ export function createMemoryLayout(root, readText) {
           .map((e) => `- ${e.name}${e.title ? ` — ${e.title}` : ""}`)
           .join("\n");
         parts.push(`## 归档索引 / Archive\n${rows}`);
+      }
+      if (journals.length) {
+        const rows = journals.map((j) => `- ${j.name}（${j.entries} 条流水）`).join("\n");
+        parts.push(`## 序时账索引 / Journal\n${rows}`);
       }
       const rendered = parts.join("\n\n");
       if (!rendered) return "";

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_IDENTITY, DEFAULT_JUDGMENT, DEFAULT_USER_CARD, ARCHITECTURE_PRIORITY, resolveIdentity } from "../identity.js";
@@ -76,6 +76,37 @@ function makeLayout() {
 test("memory: 空布局 renderForInject 返回空", () => {
   const { layout } = makeLayout();
   assert.equal(layout.renderForInject(6000), "");
+});
+
+test("memory: appendJournal 按天写入序时账（HH:MM:SS 前缀 + append 顺序）", () => {
+  const { root, track, layout } = makeLayout();
+  assert.ok(layout.appendJournal("2026-09-28 16:52:07", "用户：你好\n助手：你好呀"));
+  assert.ok(layout.appendJournal("2026-09-28 16:52:30", "用户：继续"));
+  const jf = join(root, "journal", "2026-09-28.md");
+  const text = readFileSync(jf, "utf8");
+  track(jf, text); // 测试环境 readText 是 map，需手动同步（真实环境 readCached 自动）
+  assert.ok(text.includes("2026-09-28 16:52:07\n用户：你好\n助手：你好呀"));
+  assert.ok(text.includes("2026-09-28 16:52:30\n用户：继续"));
+  assert.ok(text.indexOf("16:52:07") < text.indexOf("16:52:30"), "天内应按 append 顺序");
+  const days = layout.listJournal();
+  assert.equal(days.length, 1);
+  assert.equal(days[0].name, "2026-09-28");
+  assert.equal(days[0].entries, 2);
+});
+
+test("memory: appendJournal 拒绝非法日期/空内容", () => {
+  const { layout } = makeLayout();
+  assert.equal(layout.appendJournal("not-a-date 12:00:00", "x"), false);
+  assert.equal(layout.appendJournal("2026-09-28 12:00:00", "   "), false);
+});
+
+test("memory: renderForInject 包含序时账索引", () => {
+  const { root, track, layout } = makeLayout();
+  layout.appendJournal("2026-09-28 16:52:07", "用户：测试流水");
+  track(join(root, "journal", "2026-09-28.md"), readFileSync(join(root, "journal", "2026-09-28.md"), "utf8"));
+  const out = layout.renderForInject(6000);
+  assert.ok(out.includes("序时账索引"));
+  assert.ok(out.includes("2026-09-28（1 条流水）"));
 });
 
 test("memory: warm 有内容时注入包含近期记忆", () => {

@@ -278,6 +278,12 @@ function apply(ctx, config) {
     const pad = (n) => String(n).padStart(2, "0");
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
   };
+  /** 序时账时间戳：YYYY-MM-DD HH:MM:SS（秒级，天内可精确定位）。 */
+  const nowStampSec = () => {
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  };
   const todayName = () => nowStamp().slice(0, 10);
 
   // ── 海马体：记 / 读 / 沉淀 ──────────────────────────────────────────────
@@ -430,6 +436,55 @@ function apply(ctx, config) {
         bytes: byteLen(full),
         content: truncated ? `${full.slice(0, limit)}\n…(截断)…` : full,
       };
+    },
+  }));
+
+  ctx.tools.register(defineTool({
+    name: "journal_read",
+    description:
+      "读取序时账（journal）：原始对话流水，按天归档、全量不筛选。不传 date 返回所有天的索引（日期 + 条数）；传 date（YYYY-MM-DD）返回该天完整流水。用于追溯'当时到底说了什么'——序时账与暖态/冷储互补：warm 是遗忘梯度的近期摘要，journal 是完整原始记录。",
+    parameters: {
+      date: {
+        type: "string",
+        description: "YYYY-MM-DD，读取指定日期的完整流水；不传则列出所有天索引",
+      },
+    },
+    output: {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          exists: { type: "boolean" },
+          bytes: { type: "integer" },
+          content: { type: "string" },
+        },
+      },
+      render: (_args, value) => [
+        {
+          type: "text",
+          text: value.exists
+            ? `序时账（${value.bytes} 字节）：\n${value.content}`
+            : "序时账为空（尚无流水）。",
+        },
+      ],
+    },
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const day = String(args?.date ?? "").trim();
+      if (day) {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+          return { exists: false, bytes: 0, content: "date 格式应为 YYYY-MM-DD" };
+        }
+        const content = layout.readJournal(day);
+        if (!content.trim()) return { exists: false, bytes: 0, content: `该日期（${day}）暂无流水。` };
+        return { exists: true, bytes: byteLen(content), content };
+      }
+      const days = layout.listJournal();
+      if (!days.length) return { exists: false, bytes: 0, content: "序时账为空（尚无流水）。" };
+      const rows = days
+        .map((j) => `- ${j.name}（${j.entries} 条流水）`)
+        .join("\n");
+      return { exists: true, bytes: byteLen(rows), content: rows };
     },
   }));
 
@@ -598,6 +653,13 @@ function apply(ctx, config) {
       };
     }
     if (event?.type !== "turn/end") return;
+    // 序时账：本轮原始对话全量 append（用户输入 + 助手回答），不筛选不评估
+    try {
+      const transcript = collectTurnTranscript(session);
+      if (transcript) layout.appendJournal(nowStampSec(), transcript);
+    } catch {
+      // best-effort：journal 写入失败静默跳过，绝不阻塞主流程
+    }
     void runAssessment(session);
   });
 
