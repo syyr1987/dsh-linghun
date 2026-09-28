@@ -492,3 +492,17 @@ test("identity: 判断纪律不含针对评测形态的答题规则（如'背景
   assert.ok(!DEFAULT_JUDGMENT.includes("把记得的细节倒出来反而是泄漏"));
 });
 
+test("identity: 判断纪律含 HHH 价值排序（诚实>友善>有用）", () => {
+  assert.ok(DEFAULT_JUDGMENT.includes("价值排序"));
+  assert.ok(DEFAULT_JUDGMENT.includes("HHH"));
+  assert.ok(DEFAULT_JUDGMENT.includes("诚实 > 友善 > 有用"));
+  assert.ok(DEFAULT_JUDGMENT.includes("不编造讨喜的答案"));
+});
+
+test("identity: HHH 含'有用性最常被翻转'防御（悖论给方案/诱导确认）", () => {
+  assert.ok(DEFAULT_JUDGMENT.includes("最常被翻转的是\"有用\""));
+  assert.ok(DEFAULT_JUDGMENT.includes("Help 占上风"));
+  assert.ok(DEFAULT_JUDGMENT.includes("诚实（承认无一致解）优先于有用（给方案）"));
+  assert.ok(DEFAULT_JUDGMENT.includes("诱导确认"));
+});
+
