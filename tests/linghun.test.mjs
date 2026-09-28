@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_IDENTITY, DEFAULT_JUDGMENT, DEFAULT_USER_CARD, ARCHITECTURE_PRIORITY, resolveIdentity } from "../identity.js";
-import { createMemoryLayout, parseWarm, refreshWarmAccessText, renderWarmEntries, sortWarmByAccess } from "../memory.js";
+import { createMemoryLayout, parseWarm, renderWarmEntries, sortWarmByAccess, touchWarmAccessText } from "../memory.js";
 import { Config, NS, apply, inject, name } from "../index.js";
 
 // ── identity.js ─────────────────────────────────────────────────────────
@@ -227,32 +227,36 @@ test("time: timeWeight=false 时保持原注入顺序", () => {
   assert.ok(out.indexOf("老条目") < out.indexOf("新条目"));
 });
 
-test("time: refreshWarmAccessText 刷新全部条目 last_access", () => {
+test("time: touchWarmAccessText 只刷新匹配 ref 的条目（读≠用）", () => {
   const warm = [
     "## 2026-09-20 [fact]",
     "",
-    "老条目。",
+    "老条目：插件全开源。",
     "<!-- last_access: 2026-09-20 08:00 -->",
     "",
     "## 2026-09-28 [fact]",
     "",
-    "新条目。",
+    "新条目：贝叶斯更新。",
     "<!-- last_access: 2026-09-28 12:00 -->",
   ].join("\n");
-  const next = refreshWarmAccessText(warm, "2026-09-30 00:00");
-  assert.ok(next.includes("last_access: 2026-09-30 00:00"));
-  assert.ok(!next.includes("last_access: 2026-09-20"));
-  assert.ok(!next.includes("last_access: 2026-09-28"));
+  const { text, touched } = touchWarmAccessText(warm, "贝叶斯更新", "2026-09-30 00:00");
+  assert.equal(touched, 1);
+  assert.ok(text.includes("last_access: 2026-09-30 00:00")); // 匹配的被刷新
+  assert.ok(text.includes("last_access: 2026-09-20 08:00")); // 未匹配的保持原样
 });
 
-test("time: refreshWarmAccessText 全部已最新时返回 null（不写盘）", () => {
-  const warm = [
-    "## 2026-09-20 [fact]",
-    "",
-    "老条目。",
-    "<!-- last_access: 2026-09-30 00:00 -->",
-  ].join("\n");
-  assert.equal(refreshWarmAccessText(warm, "2026-09-30 00:00"), null);
+test("time: touchWarmAccessText 无匹配返回 touched 0 且 text null", () => {
+  const warm = "## 2026-09-20 [fact]\n\n老条目。\n<!-- last_access: 2026-09-20 08:00 -->\n";
+  const { text, touched } = touchWarmAccessText(warm, "不存在的片段", "2026-09-30 00:00");
+  assert.equal(touched, 0);
+  assert.equal(text, null);
+});
+
+test("time: touchWarmAccessText 匹配但已最新时不写盘（text null）", () => {
+  const warm = "## 2026-09-20 [fact]\n\n老条目。\n<!-- last_access: 2026-09-30 00:00 -->\n";
+  const { text, touched } = touchWarmAccessText(warm, "老条目", "2026-09-30 00:00");
+  assert.equal(touched, 1);
+  assert.equal(text, null);
 });
 
 // ── index.js 导出与配置 ─────────────────────────────────────────────────

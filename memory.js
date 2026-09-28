@@ -43,13 +43,16 @@ export function sortWarmByAccess(entries) {
   });
 }
 
-/** 把 warm 文本全部条目的 last_access 刷新为 stamp（被调用=活跃）；无变化返回 null。
- *  注意保留元数据写盘——只有渲染剥离（renderWarmEntries）时才去掉注释。 */
-export function refreshWarmAccessText(warm, stamp) {
+/** 标记 warm 中「被用到」的条目（block 包含 ref 片段）刷新 last_access。
+ *  读≠用：只有显式 touch 才算被调用=活跃。返回 { text, touched }；无变化 text=null。 */
+export function touchWarmAccessText(warm, ref, stamp) {
   const entries = parseWarm(warm);
-  if (!entries.length) return null;
+  if (!entries.length || !ref) return { text: null, touched: 0 };
   let changed = false;
+  let touched = 0;
   const blocks = entries.map((e) => {
+    if (!e.block.includes(ref)) return e.block;
+    touched += 1;
     if (!/<!-- last_access: [^>]+ -->/.test(e.block)) {
       changed = true;
       return `${e.block}\n<!-- last_access: ${stamp} -->`;
@@ -61,8 +64,7 @@ export function refreshWarmAccessText(warm, stamp) {
     if (next !== e.block) changed = true;
     return next;
   });
-  if (!changed) return null;
-  return `${blocks.join("\n\n")}\n`;
+  return { text: changed ? `${blocks.join("\n\n")}\n` : null, touched };
 }
 
 /**

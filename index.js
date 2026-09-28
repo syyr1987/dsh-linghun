@@ -20,7 +20,7 @@ import z from "@deepseek-ai/schemastery";
 import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { DEFAULT_IDENTITY, DEFAULT_JUDGMENT, DEFAULT_USER_CARD, resolveIdentity } from "./identity.js";
-import { createMemoryLayout, parseWarm, refreshWarmAccessText, renderWarmEntries } from "./memory.js";
+import { createMemoryLayout, parseWarm, renderWarmEntries, touchWarmAccessText } from "./memory.js";
 
 const name = "linghun";
 const inject = ["systemPrompt", "tools"];
@@ -278,21 +278,18 @@ function apply(ctx, config) {
     return { bytes: byteLen(block), totalBytes: total };
   };
 
-  /** 时间管理：memory_read 主动调用时，把暖态全部条目的 last_access 刷新为当前时间（被调用=活跃）。 */
-  const refreshWarmAccess = async () => {
-    try {
-      if (cfg().memory?.timeWeight === false) return;
-      const file = layout.warmFile();
-      const warm = readCached(file);
-      if (!warm || !warm.trim()) return;
-      const next = refreshWarmAccessText(warm, nowStamp());
-      if (next === null) return; // 无变化不写盘
+  /** 标记「被用到」：匹配 ref 的暖态条目刷新 last_access（读≠用，用到才 touch）。 */
+  const touchWarmAccess = async (ref) => {
+    const file = layout.warmFile();
+    const warm = readCached(file);
+    if (!warm || !warm.trim()) return 0;
+    const { text, touched } = touchWarmAccessText(warm, ref, nowStamp());
+    if (text !== null) {
       await ensureParent(file);
-      await writeFile(file, next, "utf8");
+      await writeFile(file, text, "utf8");
       fileCache.delete(file);
-    } catch {
-      // best-effort：刷新失败不影响读取
     }
+    return touched;
   };
 
   ctx.tools.register(defineTool({
@@ -332,7 +329,7 @@ function apply(ctx, config) {
   ctx.tools.register(defineTool({
     name: "memory_read",
     description:
-      "读取海马体记忆：冷储摘要（cold.md）+ 暖态近期（warm.md）+ 归档索引。需要细节时可读完整内容。",
+      "读取海马体记忆：冷储摘要（cold.md）+ 暖态近期（warm.md）+ 归档索引。需要细节时可读完整内容。读≠用：读到的条目只有实际派上用场，才用 memory_touch 标记（标记=活跃，吃灰管理）。",
     parameters: {
       full: {
         type: "boolean",
@@ -363,7 +360,6 @@ function apply(ctx, config) {
       const c = cfg();
       const max = c.memory?.injectMaxChars ?? 6000;
       const useFull = args?.full === true;
-      await refreshWarmAccess(); // 主动读取 = 被调用，刷新 last_access
       const cold = layout.readCold();
       const warm = renderWarmEntries(parseWarm(layout.readWarm()));
       const episodes = layout.listEpisodic();
@@ -386,6 +382,44 @@ function apply(ctx, config) {
         content: truncated ? `${full.slice(0, limit)}\n…(截断)…` : full,
       };
     },
+  }));
+
+  ctx.tools.register(defineTool({
+    name: "memory_touch",
+    description:
+      "标记暖态记忆为「刚刚被用到」：传入该条记忆内容中的一段文字（ref），匹配到的条目 last_access 刷新为当前时间。读≠用——memory_read 读到的条目，只有实际派上用场的才 touch，这是吃灰管理的关键动作：一直不被用到的记忆会沉底、被挤出注入。",
+    parameters: {
+      ref: {
+        type: "string",
+        required: true,
+        description: "要标记的记忆内容片段（出现在该条记忆里的一段文字，越独特越好）",
+      },
+    },
+    output: {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          touched: { type: "integer" },
+        },
+      },
+      render: (_args, value) => [
+        { type: "text", text: `已标记 ${value.touched} 条记忆为活跃。` },
+      ],
+    },
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const ref = String(args?.ref ?? "").trim();
+      if (!ref) throw new Error("memory_touch: `ref` 不能为空");
+      if (cfg().memory?.timeWeight === false) return { touched: 0 };
+      try {
+        const touched = await touchWarmAccess(ref);
+        return { touched };
+      } catch {
+        return { touched: 0 };
+      }
+    },
+    presentCall: (args) => ({ card: "generic", title: "海马体·标记活跃", kind: "other", rawInput: args }),
   }));
 
   ctx.tools.register(defineTool({
