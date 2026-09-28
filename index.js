@@ -396,7 +396,7 @@ function apply(ctx, config) {
     parameters: {
       kind: {
         type: "string",
-        description: "条目类别：fact（事实）/ decision（决策）/ preference（偏好）/ experience（经验），默认 fact",
+        description: "条目类别：fact（事实）/ decision（决策）/ preference（偏好）/ experience（经验）/ identity（用户身份与背景信息），默认 fact",
       },
       content: { type: "string", required: true, description: "要记住的 markdown 内容，简洁自包含" },
       confidence: {

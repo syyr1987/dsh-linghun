@@ -486,12 +486,9 @@ test("identity: 判断纪律含置信度声明（含翻转事实禁用）", () =
   assert.ok(DEFAULT_JUDGMENT.includes("引用即失守"));
 });
 
-test("identity: 判断纪律含回答边界（有记忆≠该答，宁缺毋滥，唯一答案）", () => {
-  assert.ok(DEFAULT_JUDGMENT.includes("回答边界"));
-  assert.ok(DEFAULT_JUDGMENT.includes("记忆里有 ≠ 该答"));
-  assert.ok(DEFAULT_JUDGMENT.includes("宁缺毋滥"));
-  assert.ok(DEFAULT_JUDGMENT.includes("唯一答案"));
-  assert.ok(DEFAULT_JUDGMENT.includes("把记得的细节倒出来反而是泄漏"));
-  assert.ok(DEFAULT_JUDGMENT.includes("项目是项目，背景是背景"), "背景题不得拿当前项目顶替");
+test("identity: 判断纪律不含针对评测形态的答题规则（如'背景题要拒答'）", () => {
+  assert.ok(!DEFAULT_JUDGMENT.includes("回答边界"), "不得注入评测形态的具体答题规则（作弊嫌疑）");
+  assert.ok(!DEFAULT_JUDGMENT.includes("背景题"), "不得把'背景题拒答'写进注入文本");
+  assert.ok(!DEFAULT_JUDGMENT.includes("把记得的细节倒出来反而是泄漏"));
 });
 
