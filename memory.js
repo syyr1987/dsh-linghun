@@ -67,12 +67,16 @@ export function sortWarmByAccess(entries) {
   });
 }
 
-/** 注入排序：先按置信度（高>中>低），组内再按 last_access（新在前）。
- *  低置信即使新也沉底——存疑内容不占注入空间，高置信永远优先。 */
+/** 注入排序：先按置信度（高>中>低>wrong）。
+ *  high（验证过的知识）不参与时间衰减——保持写入顺序，时间管不着（几个月没用也不沉底）；
+ *  medium/low 按 last_access 衰减（新在前），吃灰沉底被挤出注入——遗忘梯度只管未验证/存疑的情景。
+ *  wrong 沉底且渲染时排除。 */
 export function sortWarmForInject(entries) {
   return [...entries].sort((a, b) => {
-    const w = (CONF_WEIGHT[b.confidence ?? "medium"] ?? 1) - (CONF_WEIGHT[a.confidence ?? "medium"] ?? 1);
-    if (w !== 0) return w;
+    const wa = CONF_WEIGHT[a.confidence ?? "medium"] ?? 1;
+    const wb = CONF_WEIGHT[b.confidence ?? "medium"] ?? 1;
+    if (wa !== wb) return wb - wa;
+    if ((a.confidence === "high" && b.confidence === "high")) return 0; // 稳定排序=保持写入序
     const ta = a.lastAccess ?? "";
     const tb = b.lastAccess ?? "";
     return tb.localeCompare(ta, "en");
@@ -265,9 +269,10 @@ export function createMemoryLayout(root, readText) {
     },
 
     /** 注入用渲染：冷储摘要 + 暖态近期记忆 + 归档索引，截断到 maxChars。
-     *  opts.timeWeight !== false 时，暖态先按置信度（高>中>低）再按 last_access 排序，
-     *  超限从尾部裁剪——低置信/吃灰的记忆自然被挤出注入；低置信条目带【低置信·需验证】标记。
-     *  存在低置信条目时附声明纪律：引用存疑记忆必须先声明不确定，不编造不硬选。 */
+     *  opts.timeWeight !== false 时，暖态按 sortWarmForInject 排序：
+     *  high（验证过的知识）不衰减、保持写入序常驻；medium/low 按 last_access 衰减（吃灰沉底）；
+     *  超限从尾部裁剪——低置信/吃灰的记忆自然被挤出注入，high 知识永不因久未使用被挤出。
+     *  低置信条目带【低置信·需验证】标记；存在低置信条目时附声明纪律：引用存疑记忆必须先声明不确定，不编造不硬选。 */
     renderForInject(maxChars, opts = {}) {
       const cold = readFile(coldFile());
       const warmRaw = readFile(warmFile());

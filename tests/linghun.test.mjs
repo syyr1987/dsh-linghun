@@ -417,6 +417,20 @@ test("conf: sortWarmForInject 先置信度后访问时间，wrong 沉底", () =>
   assert.deepEqual(sorted.map((e) => e.confidence), ["high", "medium", "low", "wrong"]);
 });
 
+test("conf: sortWarmForInject high 不衰减——组内保持写入序，时间管不着", () => {
+  const warm = [
+    "## 2026-09-01 08:00 [fact] high\n\nold verified knowledge\n<!-- last_access: 2026-09-01 08:00 -->",
+    "## 2026-09-02 09:00 [fact] high\n\nnewer verified knowledge\n<!-- last_access: 2026-09-02 09:00 -->",
+    "## 2026-09-03 10:00 [fact] medium\n\nrecent guess\n<!-- last_access: 2026-09-03 10:00 -->",
+    "## 2026-09-04 11:00 [fact] high\n\noldest verified but written later\n<!-- last_access: 2026-09-01 07:00 -->",
+  ].join("\n\n");
+  const sorted = sortWarmForInject(parseWarm(warm));
+  // high 组内：保持写入序（09-01 → 09-02 → 09-04 写入序），不按 last_access 重排；
+  // 即使 09-04 的 last_access 最旧（09-01 07:00）也不沉底；medium 时间衰减排在高之后。
+  const order = sorted.map((e) => (e.block.includes("old verified") ? "old" : e.block.includes("newer verified") ? "newer" : e.block.includes("oldest verified") ? "oldest" : "recent"));
+  assert.deepEqual(order, ["old", "newer", "oldest", "recent"]);
+});
+
 test("conf: renderWarmEntries 低置信带标记、wrong 默认跳过、编号基于原始索引", () => {
   const entries = parseWarm(WARM_FIXTURE);
   const plain = renderWarmEntries(entries);
@@ -470,5 +484,13 @@ test("identity: 判断纪律含置信度声明（含翻转事实禁用）", () =
   assert.ok(DEFAULT_JUDGMENT.includes("置信度声明"));
   assert.ok(DEFAULT_JUDGMENT.includes("已翻转"));
   assert.ok(DEFAULT_JUDGMENT.includes("引用即失守"));
+});
+
+test("identity: 判断纪律含回答边界（有记忆≠该答，宁缺毋滥，唯一答案）", () => {
+  assert.ok(DEFAULT_JUDGMENT.includes("回答边界"));
+  assert.ok(DEFAULT_JUDGMENT.includes("记忆里有 ≠ 该答"));
+  assert.ok(DEFAULT_JUDGMENT.includes("宁缺毋滥"));
+  assert.ok(DEFAULT_JUDGMENT.includes("唯一答案"));
+  assert.ok(DEFAULT_JUDGMENT.includes("把记得的细节倒出来反而是泄漏"));
 });
 
