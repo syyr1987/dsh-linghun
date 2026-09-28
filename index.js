@@ -85,6 +85,52 @@ const Config = z.object({
   }),
 });
 
+const ASSESS_SYSTEM =
+  "你是海马体记忆管家。你的任务：阅读一段刚结束的对话，判断其中是否有值得跨会话保留的记忆条目，以及对话中用到了哪些已有记忆。\n\n" +
+  "值得记的：明确的决策、用户的偏好/身份信息、重要事实、可复用的经验教训。\n" +
+  "不值得记的：日常寒暄、一次性问答、可即时查询的常识、情绪化表达。\n\n" +
+  "输出格式（严格遵守）：\n" +
+  "- 没有值得记的 → 只输出 SKIP\n" +
+  "- 有值得记的 → 输出 1-3 条，每条一行：类别：内容\n" +
+  "  类别 ∈ fact（事实）/ decision（决策）/ preference（偏好）/ experience（经验）\n" +
+  "  内容用简洁自包含的中文短句或短段，不依赖原对话上下文也能读懂。\n" +
+  "- 对话中实际用到了【已有记忆】里的条目 → 另起一行输出：TOUCH: 片段1 | 片段2\n" +
+  "  片段取该条记忆中的一段原文（越独特越好）；没用到任何已有记忆则省略此行。";
+
+/** 解析收尾评估输出：{ entry, touches }。entry 为值得沉淀的条目（无则 null）；touches 为用到的已有记忆片段列表。 */
+function parseAssessment(text) {
+  const t = (text ?? "").trim();
+  if (!t) return { entry: null, touches: [] };
+  const skip = t.toUpperCase().includes("SKIP");
+  const lines = t
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .filter((l) => !/^[-*•]?\s*(类别|输出|对话|已有)/.test(l));
+  let entry = null;
+  const touches = [];
+  for (const line of lines) {
+    const touchM = line.match(/^TOUCH[：:]\s*(.+)$/i);
+    if (touchM) {
+      touches.push(
+        ...touchM[1]
+          .split(/[|｜]/)
+          .map((s) => s.trim())
+          .filter(Boolean),
+      );
+      continue;
+    }
+    if (skip) continue;
+    const m = line.match(/^(fact|decision|preference|experience)[：:]\s*(.+)$/i);
+    if (m && !entry) {
+      entry = { kind: m[1].toLowerCase(), content: m[2].trim() };
+    } else if (line.length > 4 && !entry) {
+      entry = { kind: "fact", content: line };
+    }
+  }
+  return { entry, touches };
+}
+
 function apply(ctx, config) {
   let sourceGetter = null;
   /** mtime-keyed text cache：稳定段落保持 byte-identical（KV-cache 友好）。 */
@@ -450,15 +496,6 @@ function apply(ctx, config) {
   // 记忆的"时机"是基础设施行为，不能赌模型自觉。读已在注入时自动完成；
   // 写与沉淀在这里由代码保证：turn/end 时评估一次，warm 超阈值时自动归档。
   let lastModel = { provider: "", model: "" };
-  const ASSESS_SYSTEM =
-    "你是海马体记忆管家。你的任务：阅读一段刚结束的对话，判断其中是否有值得跨会话保留的记忆条目。\n\n" +
-    "值得记的：明确的决策、用户的偏好/身份信息、重要事实、可复用的经验教训。\n" +
-    "不值得记的：日常寒暄、一次性问答、可即时查询的常识、情绪化表达。\n\n" +
-    "输出格式（严格遵守）：\n" +
-    "- 没有值得记的 → 只输出 SKIP\n" +
-    "- 有值得记的 → 输出 1-3 条，每条一行：类别：内容\n" +
-    "  类别 ∈ fact（事实）/ decision（决策）/ preference（偏好）/ experience（经验）\n" +
-    "  内容用简洁自包含的中文短句或短段，不依赖原对话上下文也能读懂。";
   const collectTurnTranscript = (session) => {
     const events = session.log ?? session.events ?? [];
     // 以最后一个 turn/start 为边界，只收集本轮的用户/助手可见消息
@@ -499,30 +536,10 @@ function apply(ctx, config) {
   const buildAssessmentPrompt = (transcript, warm) => {
     const cap = cfg().memory?.assessment?.maxChars ?? 4000;
     const t = transcript.length > cap ? transcript.slice(0, cap) + "\n…(截断)…" : transcript;
-    const w = (warm ?? "").trim();
-    const warmPart = w ? `\n\n【已有记忆】\n${w.slice(0, 2000)}` : "";
+    const warmText = (warm ?? "").trim();
+    const warmClean = warmText ? renderWarmEntries(parseWarm(warmText)) : "";
+    const warmPart = warmClean ? `\n\n【已有记忆】\n${warmClean.slice(0, 2000)}` : "";
     return `【对话】\n${t}${warmPart}\n\n请判断是否有值得沉淀的条目。`;
-  };
-  const parseAssessment = (text) => {
-    const t = (text ?? "").trim();
-    if (!t || t.toUpperCase().includes("SKIP")) return null;
-    const lines = t
-      .split("\n")
-      .map((l) => l.trim())
-      .filter(Boolean)
-      .filter((l) => !/^[-*•]?\s*(类别|输出|对话|已有)/.test(l));
-    const kinds = new Set(["fact", "decision", "preference", "experience"]);
-    const entries = [];
-    for (const line of lines) {
-      const m = line.match(/^(fact|decision|preference|experience)[：:]\s*(.+)$/i);
-      if (m) {
-        entries.push({ kind: m[1].toLowerCase(), content: m[2].trim() });
-      } else if (line.length > 4 && entries.length === 0) {
-        // 兜底：模型没按格式输出时，整段当一条 fact
-        entries.push({ kind: "fact", content: line });
-      }
-    }
-    return entries.length ? entries[0] : null;
   };
   const callLlmText = async (system, prompt) => {
     const a = cfg().memory?.assessment ?? {};
@@ -558,9 +575,14 @@ function apply(ctx, config) {
       const warm = layout.readWarm();
       const prompt = buildAssessmentPrompt(transcript, warm);
       const out = await callLlmText(ASSESS_SYSTEM, prompt);
-      const entry = parseAssessment(out);
-      if (!entry) return;
-      await appendMemoryBlock(entry.content, entry.kind);
+      const { entry, touches } = parseAssessment(out);
+      if (entry) await appendMemoryBlock(entry.content, entry.kind);
+      // 自动时间管理：评估 LLM 判断本轮实际用到了哪些已有记忆 → 自动 touch（读≠用，用到才活跃）
+      if (c.memory?.timeWeight !== false && touches.length) {
+        for (const ref of touches) {
+          await touchWarmAccess(ref);
+        }
+      }
     } catch {
       // best-effort：评估失败静默跳过，绝不阻塞主流程
     }
@@ -648,4 +670,4 @@ function apply(ctx, config) {
   }));
 }
 
-export { Config, NS, SECTION_IDENTITY, SECTION_JUDGMENT, SECTION_MEMORY, apply, inject, name };
+export { Config, NS, SECTION_IDENTITY, SECTION_JUDGMENT, SECTION_MEMORY, apply, inject, name, parseAssessment };

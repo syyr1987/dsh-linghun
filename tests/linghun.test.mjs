@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_IDENTITY, DEFAULT_JUDGMENT, DEFAULT_USER_CARD, ARCHITECTURE_PRIORITY, resolveIdentity } from "../identity.js";
 import { createMemoryLayout, parseWarm, renderWarmEntries, sortWarmByAccess, touchWarmAccessText } from "../memory.js";
-import { Config, NS, apply, inject, name } from "../index.js";
+import { Config, NS, apply, inject, name, parseAssessment } from "../index.js";
 
 // ── identity.js ─────────────────────────────────────────────────────────
 test("identity: 默认灵魂卡包含收口者身份锚点", () => {
@@ -257,6 +257,29 @@ test("time: touchWarmAccessText 匹配但已最新时不写盘（text null）", 
   const { text, touched } = touchWarmAccessText(warm, "老条目", "2026-09-30 00:00");
   assert.equal(touched, 1);
   assert.equal(text, null);
+});
+
+test("time: parseAssessment 解析 TOUCH 行（自动时间管理）", () => {
+  const out = [
+    "experience：embedding 失败要 fail-closed。",
+    "TOUCH: 贝叶斯更新 | 用户喜欢短句",
+  ].join("\n");
+  const { entry, touches } = parseAssessment(out);
+  assert.equal(entry.kind, "experience");
+  assert.deepEqual(touches, ["贝叶斯更新", "用户喜欢短句"]);
+});
+
+test("time: parseAssessment SKIP 时不沉淀但保留 TOUCH", () => {
+  const { entry, touches } = parseAssessment("SKIP\nTOUCH: 插件全开源");
+  assert.equal(entry, null);
+  assert.deepEqual(touches, ["插件全开源"]);
+});
+
+test("time: parseAssessment 空输出返回空，普通条目无 TOUCH", () => {
+  assert.deepEqual(parseAssessment(""), { entry: null, touches: [] });
+  const { entry, touches } = parseAssessment("fact：普通条目");
+  assert.equal(entry.kind, "fact");
+  assert.deepEqual(touches, []);
 });
 
 // ── index.js 导出与配置 ─────────────────────────────────────────────────
