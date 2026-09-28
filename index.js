@@ -189,16 +189,19 @@ function apply(ctx, config) {
       name: SECTION_IDENTITY,
       order: cfg().identity?.order ?? 0,
       text: renderIdentity,
+      interpolate: false,
     });
     sectionDisposers.judgment = ctx.systemPrompt.section({
       name: SECTION_JUDGMENT,
       order: cfg().judgment?.order ?? 0.2,
       text: renderJudgment,
+      interpolate: false,
     });
     sectionDisposers.memory = ctx.systemPrompt.section({
       name: SECTION_MEMORY,
       order: cfg().memory?.order ?? 0.5,
       text: renderMemory,
+      interpolate: false,
     });
   }
 

@@ -320,6 +320,38 @@ test("index: 导出 Cordis 插件契约", () => {
   assert.ok(Config);
 });
 
+test("index: 三个 prompt section 均关闭模板插值（interpolate:false，防 {{ }} 毒化）", () => {
+  const sections = [];
+  const ctx = {
+    systemPrompt: {
+      section: (s) => {
+        sections.push(s);
+        return () => {};
+      },
+    },
+    effect: (cb) => cb(),
+    inject: () => {},
+    tools: { register: () => {} },
+    on: () => {},
+  };
+  const oldHome = process.env.HOME;
+  process.env.HOME = mkdtempSync(join(tmpdir(), "linghun-test-home-"));
+  try {
+    apply(ctx, Config(undefined));
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+  }
+  const names = sections.map((s) => s.name);
+  for (const n of ["soul:identity", "soul:judgment", "soul:memory"]) {
+    assert.ok(names.includes(n), `应注册 section ${n}`);
+  }
+  for (const s of sections) {
+    assert.equal(s.interpolate, false, `${s.name} 必须设置 interpolate:false（纯文本注入）`);
+    assert.equal(typeof s.text, "function", `${s.name} 的 text 应为 function`);
+  }
+});
+
 test("index: 默认配置可解析且取默认值", () => {
   const parsed = Config(undefined);
   assert.equal(parsed.identity.enabled, true);
