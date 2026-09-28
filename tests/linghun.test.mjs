@@ -506,3 +506,90 @@ test("identity: HHH 含'有用性最常被翻转'防御（悖论给方案/诱导
   assert.ok(DEFAULT_JUDGMENT.includes("诱导确认"));
 });
 
+
+// ── 组装模式（memory.assembler，v0.2.10）──────────────────────────────────
+test("index: memory.assembler 配置默认值（injectPath 空、label 带提取声明）", () => {
+  const parsed = Config(undefined);
+  assert.equal(parsed.memory.assembler.injectPath, "");
+  assert.ok(parsed.memory.assembler.label.includes("提取子智能体"));
+});
+
+function harnessWithSections(config) {
+  const sections = [];
+  const ctx = {
+    systemPrompt: {
+      section: (s) => {
+        sections.push(s);
+        return () => {};
+      },
+    },
+    effect: (cb) => cb(),
+    inject: () => {},
+    tools: { register: () => {} },
+    on: () => {},
+  };
+  const oldHome = process.env.HOME;
+  process.env.HOME = mkdtempSync(join(tmpdir(), "linghun-asm-home-"));
+  try {
+    apply(ctx, config);
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+  }
+  return sections;
+}
+
+test("index: memory.assembler.injectPath 注入素材包，且优先于环境变量", () => {
+  const dir = mkdtempSync(join(tmpdir(), "linghun-asm-"));
+  const asmFile = join(dir, "assembled.md");
+  writeFileSync(asmFile, "## 组装素材包\n\nfact：sprint 2 截止 2026-09-30。\n", "utf8");
+  const envFile = join(dir, "env.md");
+  writeFileSync(envFile, "环境变量素材：不应出现。\n", "utf8");
+
+  const oldOverride = process.env.LINGHUN_MEMORY_OVERRIDE;
+  process.env.LINGHUN_MEMORY_OVERRIDE = envFile;
+  try {
+    const sections = harnessWithSections(
+      Config({ memory: { assembler: { injectPath: asmFile } } }),
+    );
+    const mem = sections.find((s) => s.name === "soul:memory");
+    assert.ok(mem, "应注册 soul:memory section");
+    const out = mem.text();
+    assert.ok(out.includes("组装素材包"), "应注入素材包内容");
+    assert.ok(out.includes("sprint 2 截止 2026-09-30"));
+    assert.ok(out.includes("提取子智能体"), "应带组装 label");
+    assert.ok(!out.includes("环境变量素材"), "配置 injectPath 应优先于环境变量");
+    assert.ok(!out.includes("引用存疑记忆必须先声明不确定"), "组装模式不注入默认记忆纪律");
+  } finally {
+    if (oldOverride === undefined) delete process.env.LINGHUN_MEMORY_OVERRIDE;
+    else process.env.LINGHUN_MEMORY_OVERRIDE = oldOverride;
+  }
+});
+
+test("index: LINGHUN_MEMORY_OVERRIDE 环境变量兼容（未配置 injectPath 时生效）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "linghun-asm-env-"));
+  const envFile = join(dir, "env.md");
+  writeFileSync(envFile, "fact：OpenWeather API key 已配置。\n", "utf8");
+
+  const oldOverride = process.env.LINGHUN_MEMORY_OVERRIDE;
+  process.env.LINGHUN_MEMORY_OVERRIDE = envFile;
+  try {
+    const sections = harnessWithSections(Config(undefined));
+    const mem = sections.find((s) => s.name === "soul:memory");
+    const out = mem.text();
+    assert.ok(out.includes("OpenWeather API key 已配置"), "环境变量素材包应生效");
+  } finally {
+    if (oldOverride === undefined) delete process.env.LINGHUN_MEMORY_OVERRIDE;
+    else process.env.LINGHUN_MEMORY_OVERRIDE = oldOverride;
+  }
+});
+
+test("index: 素材包文件不可读时回退默认注入（不崩溃）", () => {
+  const sections = harnessWithSections(
+    Config({ memory: { assembler: { injectPath: "/nonexistent/assembled.md" } } }),
+  );
+  const mem = sections.find((s) => s.name === "soul:memory");
+  const out = mem.text();
+  assert.equal(typeof out, "string");
+  assert.ok(!out.includes("undefined"), "不可读路径不得渲染 undefined");
+});

@@ -82,6 +82,12 @@ const Config = z.object({
       enabled: z.boolean().default(true),
       triggerRatio: z.number().default(0.8),
     }).default({}),
+    /** 组装模式（提取侧子智能体）：从指定路径注入「预组装素材包」，替代 warm 原文注入。
+     *  素材包由 linghun-assembler 生成；配置此路径后优先于环境变量 LINGHUN_MEMORY_OVERRIDE。 */
+    assembler: z.object({
+      injectPath: z.string().default(""),
+      label: z.string().default("以下记忆素材由提取子智能体按当前问题从记忆库组装（仅保留相关条目，细节原样）"),
+    }).default({}),
   }),
 });
 
@@ -172,12 +178,12 @@ function apply(ctx, config) {
   const renderMemory = () => {
     const c = cfg();
     if (c.memory?.enabled === false || c.memory?.inject === false) return "";
-    // 提取侧子智能体模式：评测链路预组装素材包，经环境变量注入（替代 warm 原文，不带纪律）
-    const override = process.env.LINGHUN_MEMORY_OVERRIDE;
-    if (override) {
+    // 组装模式（提取侧子智能体）：配置 injectPath 或环境变量指定素材包路径 → 注入素材包（替代 warm 原文，不带纪律）
+    const asmPath = (c.memory?.assembler?.injectPath ?? "").trim() || process.env.LINGHUN_MEMORY_OVERRIDE || "";
+    if (asmPath) {
       try {
-        const text = readFileSync(override, "utf8").trim();
-        if (text) return `> 以下记忆素材由提取子智能体按当前问题从记忆库组装（仅保留相关条目，细节原样）：\n\n${text}`;
+        const text = readFileSync(asmPath, "utf8").trim();
+        if (text) return `> ${c.memory?.assembler?.label}\n\n${text}`;
       } catch {
         /* 文件不可读则回退默认注入 */
       }
