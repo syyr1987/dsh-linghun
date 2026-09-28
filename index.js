@@ -20,7 +20,7 @@ import z from "@deepseek-ai/schemastery";
 import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { DEFAULT_IDENTITY, DEFAULT_JUDGMENT, DEFAULT_USER_CARD, resolveIdentity } from "./identity.js";
-import { createMemoryLayout } from "./memory.js";
+import { createMemoryLayout, parseWarm, refreshWarmAccessText, renderWarmEntries } from "./memory.js";
 
 const name = "linghun";
 const inject = ["systemPrompt", "tools"];
@@ -64,6 +64,8 @@ const Config = z.object({
     inject: z.boolean().default(true),
     injectMaxChars: z.number().default(6000),
     order: z.number().default(0.5),
+    /** 时间权重：暖态注入按 last_access（最后一次被调用）新→旧排序，吃灰的沉底被裁出注入。 */
+    timeWeight: z.boolean().default(true),
     /** warm.md 上限（字节），超出先 consolidate。 */
     maxBytes: z.number().default(1024 * 1024),
     /** 收尾评估：每轮对话结束由工程强制触发一次「有没有值得沉淀」的 LLM 评估，不依赖模型自觉。 */
@@ -124,7 +126,9 @@ function apply(ctx, config) {
   const renderMemory = () => {
     const c = cfg();
     if (c.memory?.enabled === false || c.memory?.inject === false) return "";
-    return layout.renderForInject(c.memory?.injectMaxChars);
+    return layout.renderForInject(c.memory?.injectMaxChars, {
+      timeWeight: c.memory?.timeWeight,
+    });
   };
 
   const sectionDisposers = { identity: null, judgment: null, memory: null };
@@ -250,7 +254,8 @@ function apply(ctx, config) {
 
   /** 写一条暖态记忆；开启 autoConsolidate 且达到阈值时先自动归档再写（模型无感知，不 throw）。 */
   const appendMemoryBlock = async (content, kind) => {
-    const block = `\n## ${nowStamp()} [${kind}]\n\n${content}\n`;
+    const stamp = nowStamp();
+    const block = `\n## ${stamp} [${kind}]\n\n${content}\n<!-- last_access: ${stamp} -->\n`;
     const file = layout.warmFile();
     const current = readCached(file) ?? "";
     let total = byteLen(current + block);
@@ -271,6 +276,23 @@ function apply(ctx, config) {
     await appendFile(file, block, "utf8");
     fileCache.delete(file);
     return { bytes: byteLen(block), totalBytes: total };
+  };
+
+  /** 时间管理：memory_read 主动调用时，把暖态全部条目的 last_access 刷新为当前时间（被调用=活跃）。 */
+  const refreshWarmAccess = async () => {
+    try {
+      if (cfg().memory?.timeWeight === false) return;
+      const file = layout.warmFile();
+      const warm = readCached(file);
+      if (!warm || !warm.trim()) return;
+      const next = refreshWarmAccessText(warm, nowStamp());
+      if (next === null) return; // 无变化不写盘
+      await ensureParent(file);
+      await writeFile(file, next, "utf8");
+      fileCache.delete(file);
+    } catch {
+      // best-effort：刷新失败不影响读取
+    }
   };
 
   ctx.tools.register(defineTool({
@@ -341,8 +363,9 @@ function apply(ctx, config) {
       const c = cfg();
       const max = c.memory?.injectMaxChars ?? 6000;
       const useFull = args?.full === true;
+      await refreshWarmAccess(); // 主动读取 = 被调用，刷新 last_access
       const cold = layout.readCold();
-      const warm = layout.readWarm();
+      const warm = renderWarmEntries(parseWarm(layout.readWarm()));
       const episodes = layout.listEpisodic();
       const parts = [];
       if (cold.trim()) parts.push(cold.trim());

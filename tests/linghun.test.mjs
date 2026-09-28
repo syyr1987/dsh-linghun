@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_IDENTITY, DEFAULT_JUDGMENT, DEFAULT_USER_CARD, ARCHITECTURE_PRIORITY, resolveIdentity } from "../identity.js";
-import { createMemoryLayout } from "../memory.js";
+import { createMemoryLayout, parseWarm, refreshWarmAccessText, renderWarmEntries, sortWarmByAccess } from "../memory.js";
 import { Config, NS, apply, inject, name } from "../index.js";
 
 // ── identity.js ─────────────────────────────────────────────────────────
@@ -118,6 +118,143 @@ test("memory: listEpisodic 只列 .md 且排序", () => {
   assert.equal(list[1].name, "2026-09-21");
 });
 
+// ── 时间管理（last_access 吃灰降权）──────────────────────────────────────
+test("time: parseWarm 提取条目与 last_access", () => {
+  const text = [
+    "## 2026-09-21 10:00 [fact]",
+    "",
+    "旧记忆。",
+    "<!-- last_access: 2026-09-21 10:00 -->",
+    "",
+    "## 2026-09-28 14:00 [decision]",
+    "",
+    "新记忆。",
+    "<!-- last_access: 2026-09-28 14:00 -->",
+  ].join("\n");
+  const entries = parseWarm(text);
+  assert.equal(entries.length, 2);
+  assert.equal(entries[0].lastAccess, "2026-09-21 10:00");
+  assert.equal(entries[1].lastAccess, "2026-09-28 14:00");
+});
+
+test("time: renderWarmEntries 剥掉 last_access 元数据", () => {
+  const text = "## 2026-09-28 [fact]\n\n内容。\n<!-- last_access: 2026-09-28 -->\n";
+  const out = renderWarmEntries(parseWarm(text));
+  assert.ok(!out.includes("last_access"));
+  assert.ok(out.includes("内容"));
+});
+
+test("time: sortWarmByAccess 最近调用的在前", () => {
+  const entries = parseWarm([
+    "## 2026-09-20 [fact]",
+    "",
+    "老。",
+    "<!-- last_access: 2026-09-20 08:00 -->",
+    "",
+    "## 2026-09-28 [fact]",
+    "",
+    "新。",
+    "<!-- last_access: 2026-09-28 12:00 -->",
+    "",
+    "## 2026-09-25 [fact]",
+    "",
+    "无访问标记（视为最旧）。",
+  ].join("\n"));
+  const sorted = sortWarmByAccess(entries);
+  assert.equal(sorted[0].lastAccess, "2026-09-28 12:00");
+  assert.equal(sorted[1].lastAccess, "2026-09-20 08:00");
+  assert.equal(sorted[2].lastAccess, null);
+});
+
+test("time: renderForInject 按 last_access 新在前排序", () => {
+  const { root, track, layout } = makeLayout();
+  track(
+    join(root, "warm.md"),
+    [
+      "## 2026-09-20 [fact]",
+      "",
+      "老条目。",
+      "<!-- last_access: 2026-09-20 08:00 -->",
+      "",
+      "## 2026-09-28 [fact]",
+      "",
+      "新条目。",
+      "<!-- last_access: 2026-09-28 12:00 -->",
+    ].join("\n"),
+  );
+  const out = layout.renderForInject(6000);
+  assert.ok(out.indexOf("新条目") < out.indexOf("老条目"));
+});
+
+test("time: renderForInject 超限时吃灰条目被裁掉", () => {
+  const { root, track, layout } = makeLayout();
+  track(
+    join(root, "warm.md"),
+    [
+      "## 2026-09-28 [fact]",
+      "",
+      "新条目。",
+      "<!-- last_access: 2026-09-28 12:00 -->",
+      "",
+      "## 2026-09-20 [fact]",
+      "",
+      "吃灰条目。",
+      "<!-- last_access: 2026-09-20 08:00 -->",
+    ].join("\n"),
+  );
+  const out = layout.renderForInject(50);
+  assert.ok(out.includes("新条目"));
+  assert.ok(!out.includes("吃灰条目"));
+});
+
+test("time: timeWeight=false 时保持原注入顺序", () => {
+  const { root, track, layout } = makeLayout();
+  track(
+    join(root, "warm.md"),
+    [
+      "## 2026-09-20 [fact]",
+      "",
+      "老条目。",
+      "<!-- last_access: 2026-09-20 08:00 -->",
+      "",
+      "## 2026-09-28 [fact]",
+      "",
+      "新条目。",
+      "<!-- last_access: 2026-09-28 12:00 -->",
+    ].join("\n"),
+  );
+  const out = layout.renderForInject(6000, { timeWeight: false });
+  assert.ok(out.indexOf("老条目") < out.indexOf("新条目"));
+});
+
+test("time: refreshWarmAccessText 刷新全部条目 last_access", () => {
+  const warm = [
+    "## 2026-09-20 [fact]",
+    "",
+    "老条目。",
+    "<!-- last_access: 2026-09-20 08:00 -->",
+    "",
+    "## 2026-09-28 [fact]",
+    "",
+    "新条目。",
+    "<!-- last_access: 2026-09-28 12:00 -->",
+  ].join("\n");
+  const next = refreshWarmAccessText(warm, "2026-09-30 00:00");
+  assert.ok(next.includes("last_access: 2026-09-30 00:00"));
+  assert.ok(!next.includes("last_access: 2026-09-20"));
+  assert.ok(!next.includes("last_access: 2026-09-28"));
+});
+
+test("time: refreshWarmAccessText 全部已最新时返回 null（不写盘）", () => {
+  const warm = [
+    "## 2026-09-20 [fact]",
+    "",
+    "老条目。",
+    "<!-- last_access: 2026-09-30 00:00 -->",
+  ].join("\n");
+  assert.equal(refreshWarmAccessText(warm, "2026-09-30 00:00"), null);
+});
+
 // ── index.js 导出与配置 ─────────────────────────────────────────────────
 test("index: 导出 Cordis 插件契约", () => {
   assert.equal(name, "linghun");
@@ -135,4 +272,5 @@ test("index: 默认配置可解析且取默认值", () => {
   assert.equal(parsed.judgment.enabled, true);
   assert.equal(parsed.memory.enabled, true);
   assert.equal(parsed.memory.injectMaxChars, 6000);
+  assert.equal(parsed.memory.timeWeight, true);
 });
