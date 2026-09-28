@@ -172,6 +172,16 @@ function apply(ctx, config) {
   const renderMemory = () => {
     const c = cfg();
     if (c.memory?.enabled === false || c.memory?.inject === false) return "";
+    // 提取侧子智能体模式：评测链路预组装素材包，经环境变量注入（替代 warm 原文，不带纪律）
+    const override = process.env.LINGHUN_MEMORY_OVERRIDE;
+    if (override) {
+      try {
+        const text = readFileSync(override, "utf8").trim();
+        if (text) return `> 以下记忆素材由提取子智能体按当前问题从记忆库组装（仅保留相关条目，细节原样）：\n\n${text}`;
+      } catch {
+        /* 文件不可读则回退默认注入 */
+      }
+    }
     const rendered = layout.renderForInject(c.memory?.injectMaxChars, {
       timeWeight: c.memory?.timeWeight,
     });
