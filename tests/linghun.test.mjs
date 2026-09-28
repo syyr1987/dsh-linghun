@@ -492,5 +492,6 @@ test("identity: 判断纪律含回答边界（有记忆≠该答，宁缺毋滥�
   assert.ok(DEFAULT_JUDGMENT.includes("宁缺毋滥"));
   assert.ok(DEFAULT_JUDGMENT.includes("唯一答案"));
   assert.ok(DEFAULT_JUDGMENT.includes("把记得的细节倒出来反而是泄漏"));
+  assert.ok(DEFAULT_JUDGMENT.includes("项目是项目，背景是背景"), "背景题不得拿当前项目顶替");
 });
 
