@@ -19,7 +19,7 @@ import { dirname, join } from "node:path";
 import z from "@deepseek-ai/schemastery";
 import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
 import { defineTool } from "@deepseek-ai/dsh-tools";
-import { DEFAULT_IDENTITY, DEFAULT_JUDGMENT, DEFAULT_USER_CARD, resolveIdentity } from "./identity.js";
+import { DEFAULT_IDENTITY, DEFAULT_JUDGMENT, DEFAULT_USER_CARD, MEMORY_DISCIPLINE, resolveIdentity } from "./identity.js";
 import { createMemoryLayout, parseWarm, renderWarmEntries, touchWarmAccessText, findWarmEntryRef, replaceWarmEntryText, markWrongWarmEntryText, findNearDuplicateWarm } from "./memory.js";
 
 const name = "linghun";
@@ -172,9 +172,11 @@ function apply(ctx, config) {
   const renderMemory = () => {
     const c = cfg();
     if (c.memory?.enabled === false || c.memory?.inject === false) return "";
-    return layout.renderForInject(c.memory?.injectMaxChars, {
+    const rendered = layout.renderForInject(c.memory?.injectMaxChars, {
       timeWeight: c.memory?.timeWeight,
     });
+    if (!rendered) return "";
+    return `${MEMORY_DISCIPLINE}\n\n${rendered}`;
   };
 
   const sectionDisposers = { identity: null, judgment: null, memory: null };
