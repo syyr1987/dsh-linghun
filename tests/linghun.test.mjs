@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_IDENTITY, DEFAULT_JUDGMENT, ARCHITECTURE_PRIORITY, resolveIdentity } from "../identity.js";
+import { DEFAULT_IDENTITY, DEFAULT_JUDGMENT, DEFAULT_USER_CARD, ARCHITECTURE_PRIORITY, resolveIdentity } from "../identity.js";
 import { createMemoryLayout } from "../memory.js";
 import { Config, NS, apply, inject, name } from "../index.js";
 
@@ -24,6 +24,17 @@ test("identity: 判断纪律包含六类边界", () => {
   assert.ok(DEFAULT_JUDGMENT.includes("知识边界"));
   assert.ok(DEFAULT_JUDGMENT.includes("伦理"));
   assert.ok(DEFAULT_JUDGMENT.includes("抬高拒绝成本"));
+});
+
+test("identity: 用户卡其他栏默认带方法论种子（思渊六条）", () => {
+  assert.ok(DEFAULT_USER_CARD.includes("方法论种子"));
+  assert.ok(DEFAULT_USER_CARD.includes("毛选式"));
+  assert.ok(DEFAULT_USER_CARD.includes("科学方法论"));
+  assert.ok(DEFAULT_USER_CARD.includes("系统思维"));
+  assert.ok(DEFAULT_USER_CARD.includes("逻辑工具箱"));
+  assert.ok(DEFAULT_USER_CARD.includes("认知偏差"));
+  assert.ok(DEFAULT_USER_CARD.includes("贝叶斯更新"));
+  assert.ok(DEFAULT_USER_CARD.includes("相对真理"));
 });
 
 test("identity: 用户人设文件优先于配置，且架构层始终垫底", () => {
