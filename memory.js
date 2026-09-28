@@ -17,7 +17,9 @@ export const COLD = "cold.md";
 export const EPISODIC_DIR = "episodic";
 export const JOURNAL_DIR = "journal";
 
-/** 解析 warm.md 为条目数组；每条提取 last_access 元数据（无则 null=视为最旧）。 */
+/** 解析 warm.md 为条目数组；每条提取 last_access 与 confidence 元数据。
+ *  标题行格式：`## <stamp> [<kind>] <confidence>`；confidence 缺省视为 medium（老条目兼容）。
+ *  confidence：high / medium / low / wrong（wrong=被翻转的事实，已废弃，注入时排除）。 */
 export function parseWarm(text) {
   const blocks = String(text ?? "")
     .split(/\n(?=## )/)
@@ -25,14 +27,34 @@ export function parseWarm(text) {
     .filter(Boolean);
   return blocks.map((block) => {
     const m = block.match(/<!-- last_access: ([^>]+) -->/);
-    return { block, lastAccess: m ? m[1].trim() : null };
+    const cm = block.match(/^## .*?\[[a-z_]+\]\s+(high|medium|low|wrong)\s*$/m);
+    return { block, lastAccess: m ? m[1].trim() : null, confidence: cm ? cm[1] : "medium" };
   });
 }
 
-/** 渲染条目为纯内容（剥掉 last_access 元数据），按原顺序 join。 */
-export function renderWarmEntries(entries) {
+const CONF_WEIGHT = { high: 2, medium: 1, low: 0, wrong: -1 };
+
+/** 渲染条目为纯内容（剥掉 last_access 元数据），按原顺序 join。
+ *  opts.markLow !== false：低置信条目加【低置信·需验证】前缀（提醒模型声明存疑）。
+ *  opts.includeWrong !== true：wrong（被翻转）条目默认跳过——注入绝不引用已废弃事实。
+ *  opts.numbered：每条加 [n] 编号前缀（基于原始索引，供 memory_append update 引用）。 */
+export function renderWarmEntries(entries, opts = {}) {
   return entries
-    .map((e) => e.block.replace(/\n?<!-- last_access: [^>]+ -->/, ""))
+    .map((e, i) => ({ e, i }))
+    .filter(({ e }) => opts.includeWrong === true || e.confidence !== "wrong")
+    .map(({ e, i }) => {
+      const body = e.block.replace(/\n?<!-- last_access: [^>]+ -->/, "");
+      const num = opts.numbered ? `[${i + 1}] ` : "";
+      const tag =
+        e.confidence === "wrong"
+          ? "【已翻转·勿引用】 "
+          : opts.markLow === false
+            ? ""
+            : e.confidence === "low"
+              ? "【低置信·需验证】 "
+              : "";
+      return `${num}${tag}${body}`;
+    })
     .join("\n\n");
 }
 
@@ -45,9 +67,91 @@ export function sortWarmByAccess(entries) {
   });
 }
 
+/** 注入排序：先按置信度（高>中>低），组内再按 last_access（新在前）。
+ *  低置信即使新也沉底——存疑内容不占注入空间，高置信永远优先。 */
+export function sortWarmForInject(entries) {
+  return [...entries].sort((a, b) => {
+    const w = (CONF_WEIGHT[b.confidence ?? "medium"] ?? 1) - (CONF_WEIGHT[a.confidence ?? "medium"] ?? 1);
+    if (w !== 0) return w;
+    const ta = a.lastAccess ?? "";
+    const tb = b.lastAccess ?? "";
+    return tb.localeCompare(ta, "en");
+  });
+}
+
 /** 匹配前剥掉 markdown 格式标记（**、*、`），避免模型选的 ref 跨标记匹配失败。 */
 export function normalizeForMatch(text) {
   return text.replace(/[*`]+/g, "");
+}
+
+/** 归一化文本用于查重：剥标题行/访问时间/markdown 标记/空白，统一小写。 */
+export function normalizeText(text) {
+  return String(text ?? "")
+    .replace(/^## .*$/gm, "")
+    .replace(/<!-- last_access: [^>]+ -->/g, "")
+    .replace(/[*`]+/g, "")
+    .replace(/\s+/g, "")
+    .trim()
+    .toLowerCase();
+}
+
+/** 按 ref 定位 warm 条目：支持 `[n]` 编号（memory_read 展示顺序，1-based）或内容片段。
+ *  匹配双方先剥 markdown 标记。返回 { index, entry } 或 null。 */
+export function findWarmEntryRef(warm, ref) {
+  const entries = parseWarm(warm);
+  if (!entries.length) return null;
+  const key = normalizeForMatch(String(ref ?? "")).trim();
+  if (!key) return null;
+  const num = key.match(/^\[(\d+)\]$/);
+  if (num) {
+    const idx = Number(num[1]) - 1;
+    if (idx >= 0 && idx < entries.length) return { index: idx, entry: entries[idx] };
+    return null;
+  }
+  const idx = entries.findIndex((e) => normalizeForMatch(e.block).includes(key));
+  if (idx < 0) return null;
+  return { index: idx, entry: entries[idx] };
+}
+
+/** 用 nextBlock 替换 ref 命中的条目（保留原位置，其他条目不变）。无匹配返回 null。 */
+export function replaceWarmEntryText(warm, ref, nextBlock) {
+  const found = findWarmEntryRef(warm, ref);
+  if (!found) return null;
+  const entries = parseWarm(warm);
+  entries[found.index] = { ...entries[found.index], block: nextBlock.trim() };
+  return `${entries.map((e) => e.block).join("\n\n")}\n`;
+}
+
+/** 把 ref 命中的条目标记为 wrong（被翻转）：标题 confidence 改 wrong，内容保留（追溯）。无匹配返回 null。 */
+export function markWrongWarmEntryText(warm, ref) {
+  const found = findWarmEntryRef(warm, ref);
+  if (!found) return null;
+  const entries = parseWarm(warm);
+  const next = entries[found.index].block.replace(
+    /^## (.+?)(?:\s+\[[a-z_]+\])?(?:\s+(?:high|medium|low|wrong))?\s*$/m,
+    (_m, stamp) => `${stamp} [fact] wrong`,
+  );
+  entries[found.index] = { ...entries[found.index], block: next, confidence: "wrong" };
+  return `${entries.map((e) => e.block).join("\n\n")}\n`;
+}
+
+/** 查近似重复：新内容与已有条目归一化后完全相等（equal）或短者是长者的子串且长度差 < 1.8 倍（contains）。
+ *  命中返回 { index, entry, reason }，否则 null。只合并"几乎一样"的，不误伤不同事实。 */
+export function findNearDuplicateWarm(warm, content) {
+  const entries = parseWarm(warm);
+  if (!entries.length) return null;
+  const key = normalizeText(content);
+  if (!key) return null;
+  for (let i = 0; i < entries.length; i++) {
+    const body = normalizeText(entries[i].block);
+    if (!body) continue;
+    if (body === key) return { index: i, entry: entries[i], reason: "equal" };
+    const [short, long] = body.length <= key.length ? [body, key] : [key, body];
+    if (short.length > 0 && long.includes(short) && long.length <= short.length * 1.8) {
+      return { index: i, entry: entries[i], reason: "contains" };
+    }
+  }
+  return null;
 }
 
 /** 标记 warm 中「被用到」的条目（block 包含 ref 片段）刷新 last_access。
@@ -161,8 +265,9 @@ export function createMemoryLayout(root, readText) {
     },
 
     /** 注入用渲染：冷储摘要 + 暖态近期记忆 + 归档索引，截断到 maxChars。
-     *  opts.timeWeight !== false 时，暖态按 last_access 排序（新在前、吃灰沉底），
-     *  超限从尾部裁剪——吃灰的记忆自然被挤出注入；同时剥掉元数据保持注入干净。 */
+     *  opts.timeWeight !== false 时，暖态先按置信度（高>中>低）再按 last_access 排序，
+     *  超限从尾部裁剪——低置信/吃灰的记忆自然被挤出注入；低置信条目带【低置信·需验证】标记。
+     *  存在低置信条目时附声明纪律：引用存疑记忆必须先声明不确定，不编造不硬选。 */
     renderForInject(maxChars, opts = {}) {
       const cold = readFile(coldFile());
       const warmRaw = readFile(warmFile());
@@ -170,12 +275,18 @@ export function createMemoryLayout(root, readText) {
       const journals = listJournal();
       let warm = warmRaw;
       if (opts.timeWeight !== false && warmRaw.trim()) {
-        const entries = sortWarmByAccess(parseWarm(warmRaw));
+        const entries = sortWarmForInject(parseWarm(warmRaw));
         warm = renderWarmEntries(entries);
       }
       const parts = [];
       if (cold.trim()) parts.push(cold.trim());
-      if (warm.trim()) parts.push(`## 近期记忆 / Recent\n\n${warm.trim()}`);
+      if (warm.trim()) {
+        const lowExists = /【低置信·需验证】/.test(warm);
+        const note = lowExists
+          ? "\n> 记忆带置信度：无标记=中置信；【低置信·需验证】=存疑。引用存疑记忆必须先声明不确定，不得当确定事实输出；与高置信/新记忆冲突时明说矛盾，不硬选。\n"
+          : "";
+        parts.push(`## 近期记忆 / Recent\n${note}\n${warm.trim()}`);
+      }
       if (episodes.length) {
         const rows = episodes
           .map((e) => `- ${e.name}${e.title ? ` — ${e.title}` : ""}`)

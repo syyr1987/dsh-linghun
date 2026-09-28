@@ -20,7 +20,7 @@ import z from "@deepseek-ai/schemastery";
 import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { DEFAULT_IDENTITY, DEFAULT_JUDGMENT, DEFAULT_USER_CARD, resolveIdentity } from "./identity.js";
-import { createMemoryLayout, parseWarm, renderWarmEntries, touchWarmAccessText } from "./memory.js";
+import { createMemoryLayout, parseWarm, renderWarmEntries, touchWarmAccessText, findWarmEntryRef, replaceWarmEntryText, markWrongWarmEntryText, findNearDuplicateWarm } from "./memory.js";
 
 const name = "linghun";
 const inject = ["systemPrompt", "tools"];
@@ -307,12 +307,54 @@ function apply(ctx, config) {
     return { archived: byteLen(warm), warmCleared: true };
   };
 
-  /** 写一条暖态记忆；开启 autoConsolidate 且达到阈值时先自动归档再写（模型无感知，不 throw）。 */
-  const appendMemoryBlock = async (content, kind) => {
+  /** 写一条暖态记忆；开启 autoConsolidate 且达到阈值时先自动归档再写（模型无感知，不 throw）。
+   *  opts.update：翻转语义——ref 命中正常条目 → 旧条目标 wrong（被翻转），新内容另起一条（默认 high）；
+   *                ref 命中 wrong 条目 → 复活为高置信新内容（替换）。
+   *  opts.confidence：high/medium/low（默认 medium）。
+   *  无 update 时自动查近似重复（findNearDuplicateWarm）：几乎相同内容 → 替换不追加（防 BEAM 式旧新并存）。
+   *  返回 { mode: "append" | "update" | "dedupe", bytes, totalBytes }。 */
+  const appendMemoryBlock = async (content, kind, opts = {}) => {
     const stamp = nowStamp();
-    const block = `\n## ${stamp} [${kind}]\n\n${content}\n<!-- last_access: ${stamp} -->\n`;
+    const conf = ["high", "medium", "low"].includes(opts.confidence) ? opts.confidence : "medium";
+    const block = `\n## ${stamp} [${kind}] ${conf}\n\n${content}\n<!-- last_access: ${stamp} -->\n`;
     const file = layout.warmFile();
     const current = readCached(file) ?? "";
+
+    if (opts.update) {
+      const found = findWarmEntryRef(current, opts.update);
+      if (found) {
+        if (found.entry.confidence === "wrong") {
+          // 复活：被翻转的条目被证明其实对，替换为高置信新内容
+          const next = replaceWarmEntryText(current, opts.update, block.trim());
+          await ensureParent(file);
+          await writeFile(file, next, "utf8");
+          fileCache.delete(file);
+          return { mode: "update", bytes: byteLen(block), totalBytes: byteLen(next) };
+        }
+        // 翻转：旧条目标 wrong，新内容追加为独立条目（默认 high，除非显式传 confidence）
+        const flipped = markWrongWarmEntryText(current, opts.update);
+        const highBlock = `\n## ${stamp} [${kind}] high\n\n${content}\n<!-- last_access: ${stamp} -->\n`;
+        const next = flipped === null ? current : flipped;
+        const finalText = `${next.trimEnd()}\n${highBlock.trim()}\n`;
+        await ensureParent(file);
+        await writeFile(file, finalText, "utf8");
+        fileCache.delete(file);
+        return { mode: "update", bytes: byteLen(highBlock), totalBytes: byteLen(finalText) };
+      }
+      // ref 没匹配到：fall through 追加（模型引用失效时不让写入失败）
+    }
+
+    const dup = findNearDuplicateWarm(current, content);
+    if (dup) {
+      const entries = parseWarm(current);
+      entries[dup.index] = { ...entries[dup.index], block: block.trim() };
+      const next = `${entries.map((e) => e.block).join("\n\n")}\n`;
+      await ensureParent(file);
+      await writeFile(file, next, "utf8");
+      fileCache.delete(file);
+      return { mode: "dedupe", bytes: byteLen(block), totalBytes: byteLen(next) };
+    }
+
     let total = byteLen(current + block);
     const max = cfg().memory?.maxBytes ?? 1024 * 1024;
     const ac = cfg().memory?.autoConsolidate;
@@ -330,7 +372,7 @@ function apply(ctx, config) {
     await ensureParent(file);
     await appendFile(file, block, "utf8");
     fileCache.delete(file);
-    return { bytes: byteLen(block), totalBytes: total };
+    return { mode: "append", bytes: byteLen(block), totalBytes: total };
   };
 
   /** 标记「被用到」：匹配 ref 的暖态条目刷新 last_access（读≠用，用到才 touch）。 */
@@ -350,25 +392,43 @@ function apply(ctx, config) {
   ctx.tools.register(defineTool({
     name: "memory_append",
     description:
-      "把一条带时间戳的 Markdown 记进海马体暖态工位（warm.md）。适合跨会话保留的事实、决策、偏好、经验。条目要简洁自包含，不要一次性倾倒。积累多了用 memory_consolidate 沉淀。",
+      "把一条带时间戳的 Markdown 记进海马体暖态工位（warm.md）。适合跨会话保留的事实、决策、偏好、经验。条目要简洁自包含，不要一次性倾倒。积累多了用 memory_consolidate 沉淀。\n\n置信度（confidence）：high=用户直接说/已验证；medium=推断（默认）；low=存疑/猜测/过期待验。低置信条目注入时带【低置信·需验证】标记，引用时必须声明不确定。\n\n更新（update）：发现旧条目已被推翻/变更时，传 memory_read 返回的编号（如 [3]）或该条目内容片段——旧条目标记为 wrong（被翻转，不再注入），新内容另起一条（默认高置信）。近似重复内容会自动合并不追加。",
     parameters: {
       kind: {
         type: "string",
         description: "条目类别：fact（事实）/ decision（决策）/ preference（偏好）/ experience（经验），默认 fact",
       },
       content: { type: "string", required: true, description: "要记住的 markdown 内容，简洁自包含" },
+      confidence: {
+        type: "string",
+        enum: ["high", "medium", "low"],
+        description: "置信度：high（用户直接说/已验证）/ medium（推断，默认）/ low（存疑/猜测/过期待验）",
+      },
+      update: {
+        type: "string",
+        description: "可选。要翻转/覆盖的旧条目：传 memory_read 返回的编号（如 [3]）或内容片段。命中后旧条目标记为 wrong（被翻转），新内容另起一条（默认高置信）。用于旧事实被推翻、决策变更、偏好改变等场景",
+      },
     },
     output: {
       schema: {
         type: "object",
         additionalProperties: false,
         properties: {
+          mode: { type: "string" },
           bytes: { type: "integer" },
           totalBytes: { type: "integer" },
         },
       },
       render: (_args, value) => [
-        { type: "text", text: `已记入海马体（${value.bytes} 字节，累计 ${value.totalBytes}）。` },
+        {
+          type: "text",
+          text:
+            value.mode === "update"
+              ? `已翻转旧条目为新事实（${value.bytes} 字节，累计 ${value.totalBytes}）。`
+              : value.mode === "dedupe"
+                ? `已合并近似重复条目（${value.bytes} 字节，累计 ${value.totalBytes}）。`
+                : `已记入海马体（${value.bytes} 字节，累计 ${value.totalBytes}）。`,
+        },
       ],
     },
     isConcurrencySafe: () => false,
@@ -376,7 +436,9 @@ function apply(ctx, config) {
       const content = String(args.content ?? "").trim();
       if (!content) throw new Error("memory_append: `content` 不能为空");
       const kind = String(args.kind ?? "fact").trim() || "fact";
-      return appendMemoryBlock(content, kind);
+      const confidence = String(args.confidence ?? "").trim();
+      const update = String(args.update ?? "").trim() || undefined;
+      return appendMemoryBlock(content, kind, { confidence, update });
     },
     presentCall: (args) => ({ card: "generic", title: "海马体·记录", kind: "other", rawInput: args }),
   }));
@@ -416,7 +478,10 @@ function apply(ctx, config) {
       const max = c.memory?.injectMaxChars ?? 6000;
       const useFull = args?.full === true;
       const cold = layout.readCold();
-      const warm = renderWarmEntries(parseWarm(layout.readWarm()));
+      const warm = renderWarmEntries(parseWarm(layout.readWarm()), {
+        numbered: true,
+        includeWrong: true,
+      });
       const episodes = layout.listEpisodic();
       const parts = [];
       if (cold.trim()) parts.push(cold.trim());

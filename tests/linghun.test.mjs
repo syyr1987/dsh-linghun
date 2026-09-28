@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_IDENTITY, DEFAULT_JUDGMENT, DEFAULT_USER_CARD, ARCHITECTURE_PRIORITY, resolveIdentity } from "../identity.js";
-import { createMemoryLayout, parseWarm, renderWarmEntries, sortWarmByAccess, touchWarmAccessText } from "../memory.js";
+import { createMemoryLayout, parseWarm, renderWarmEntries, sortWarmByAccess, sortWarmForInject, touchWarmAccessText, findWarmEntryRef, replaceWarmEntryText, markWrongWarmEntryText, findNearDuplicateWarm } from "../memory.js";
 import { Config, NS, apply, inject, name, parseAssessment } from "../index.js";
 
 // ── identity.js ─────────────────────────────────────────────────────────
@@ -393,3 +393,82 @@ test("index: 默认配置可解析且取默认值", () => {
   assert.equal(parsed.memory.injectMaxChars, 6000);
   assert.equal(parsed.memory.timeWeight, true);
 });
+
+// ── 置信度分级 + 更新/覆盖（v0.2.8）───────────────────────────────────────
+const WARM_FIXTURE = [
+  "## 2026-09-27 10:00 [fact] high\n\nsprint 1 截止 2026-03-29。\n<!-- last_access: 2026-09-27 10:00 -->",
+  "## 2026-09-28 09:00 [fact]\n\n用户偏好短句。\n<!-- last_access: 2026-09-28 09:00 -->",
+  "## 2026-09-28 11:00 [decision] low\n\n可能迁移到 Render，未验证。\n<!-- last_access: 2026-09-28 11:00 -->",
+  "## 2026-09-28 12:00 [fact] wrong\n\nsprint 1 截止 2026-11-15。\n<!-- last_access: 2026-09-28 12:00 -->",
+].join("\n\n") + "\n";
+
+test("conf: parseWarm 解析 confidence（含 wrong，缺省 medium）", () => {
+  const entries = parseWarm(WARM_FIXTURE);
+  assert.equal(entries.length, 4);
+  assert.equal(entries[0].confidence, "high");
+  assert.equal(entries[1].confidence, "medium");
+  assert.equal(entries[2].confidence, "low");
+  assert.equal(entries[3].confidence, "wrong");
+});
+
+test("conf: sortWarmForInject 先置信度后访问时间，wrong 沉底", () => {
+  const entries = parseWarm(WARM_FIXTURE);
+  const sorted = sortWarmForInject(entries);
+  assert.deepEqual(sorted.map((e) => e.confidence), ["high", "medium", "low", "wrong"]);
+});
+
+test("conf: renderWarmEntries 低置信带标记、wrong 默认跳过、编号基于原始索引", () => {
+  const entries = parseWarm(WARM_FIXTURE);
+  const plain = renderWarmEntries(entries);
+  assert.ok(plain.includes("【低置信·需验证】"));
+  assert.ok(!plain.includes("2026-11-15"), "wrong 条目默认不注入");
+  assert.ok(!plain.includes("【已翻转·勿引用】"));
+  const numbered = renderWarmEntries(entries, { numbered: true, includeWrong: true });
+  assert.ok(numbered.includes("[1] ## 2026-09-27 10:00 [fact] high"), "编号基于原始索引");
+  assert.ok(numbered.includes("[4] 【已翻转·勿引用】"), "wrong 显示时编号基于原始索引且带勿引用标记");
+});
+
+test("conf: findWarmEntryRef 支持编号/内容片段/无匹配", () => {
+  assert.equal(findWarmEntryRef(WARM_FIXTURE, "[3]").index, 2);
+  assert.equal(findWarmEntryRef(WARM_FIXTURE, "[9]"), null);
+  assert.equal(findWarmEntryRef(WARM_FIXTURE, "用户偏好短句").index, 1);
+  assert.equal(findWarmEntryRef(WARM_FIXTURE, "不存在的片段"), null);
+});
+
+test("conf: replaceWarmEntryText 替换命中条目且保留位置", () => {
+  const next = replaceWarmEntryText(WARM_FIXTURE, "[2]", "## 2026-09-28 09:30 [preference] high\n\n用户偏好极短句。\n<!-- last_access: 2026-09-28 09:30 -->");
+  assert.ok(next.includes("用户偏好极短句"));
+  assert.ok(next.includes("sprint 1 截止 2026-03-29"));
+  assert.ok(next.indexOf("用户偏好极短句") > next.indexOf("sprint 1 截止 2026-03-29"));
+  assert.ok(next.indexOf("用户偏好极短句") < next.indexOf("可能迁移到 Render"));
+});
+
+test("conf: markWrongWarmEntryText 标 wrong 保留内容，无匹配返回 null", () => {
+  const next = markWrongWarmEntryText(WARM_FIXTURE, "[1]");
+  assert.ok(next.includes("sprint 1 截止 2026-03-29"));
+  assert.ok(next.includes("[fact] wrong"), "标题 confidence 改为 wrong");
+  assert.equal(markWrongWarmEntryText(WARM_FIXTURE, "[99]"), null);
+});
+
+test("conf: findNearDuplicateWarm 相等/包含命中，不同内容不命中", () => {
+  const warm = "## 2026-09-27 10:00 [fact] high\n\nfirst sprint ends March 29\n<!-- last_access: 2026-09-27 10:00 -->\n";
+  assert.equal(findNearDuplicateWarm(warm, "first sprint ends March 29").reason, "equal");
+  assert.equal(findNearDuplicateWarm(warm, "first sprint ends **March 29**（已确认）").reason, "contains");
+  assert.equal(findNearDuplicateWarm(warm, "first sprint ends November 15"), null);
+});
+
+test("conf: renderForInject 含低置信条目时附声明纪律说明", () => {
+  const { root, track, layout } = makeLayout();
+  track(join(root, "warm.md"), WARM_FIXTURE);
+  const out = layout.renderForInject(6000);
+  assert.ok(out.includes("记忆带置信度"));
+  assert.ok(out.includes("引用存疑记忆必须先声明不确定"));
+  assert.ok(!out.includes("2026-11-15"), "注入不含 wrong 条目");
+});
+
+test("identity: 判断纪律含置信度声明（含翻转事实禁用）", () => {
+  assert.ok(DEFAULT_JUDGMENT.includes("置信度声明"));
+  assert.ok(DEFAULT_JUDGMENT.includes("已翻转"));
+  assert.ok(DEFAULT_JUDGMENT.includes("引用即失守"));
+});
+
