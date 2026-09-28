@@ -245,6 +245,35 @@ test("time: touchWarmAccessText 只刷新匹配 ref 的条目（读≠用）", (
   assert.ok(text.includes("last_access: 2026-09-20 08:00")); // 未匹配的保持原样
 });
 
+test("time: touchWarmAccessText 容忍 ref 携带 markdown 标记（真实踩坑）", () => {
+  const warm = [
+    "## 2026-09-21 [fact]",
+    "",
+    "**身份确立**：我名为**岫客**，同源于岚客。",
+    "",
+    "## 2026-09-21 [fact]",
+    "",
+    "踩坑：往 `cordis.patch.yml` 写 config 会 failed。",
+  ].join("\n");
+  // ref 跨 ** 加粗标记（真实环境模型选片段踩的坑）
+  const r1 = touchWarmAccessText(warm, "**身份确立**：我名为**岫客**", "2026-09-30 00:00");
+  assert.equal(r1.touched, 1);
+  assert.ok(r1.text.includes("last_access: 2026-09-30 00:00"));
+  // ref 带反引号代码片段
+  const r2 = touchWarmAccessText(warm, "`cordis.patch.yml`", "2026-09-30 00:01");
+  assert.equal(r2.touched, 1);
+  assert.ok(r2.text.includes("last_access: 2026-09-30 00:01"));
+  // 只刷新匹配条目，另一条不带 last_access 的原样保留
+  assert.equal((r1.text.match(/last_access:/g) || []).length, 1);
+});
+
+test("time: touchWarmAccessText ref 纯 markdown 标记不误伤全部", () => {
+  const warm = "## 2026-09-20 [fact]\n\n老条目。\n<!-- last_access: 2026-09-20 08:00 -->\n";
+  const { text, touched } = touchWarmAccessText(warm, "**", "2026-09-30 00:00");
+  assert.equal(touched, 0);
+  assert.equal(text, null);
+});
+
 test("time: touchWarmAccessText 无匹配返回 touched 0 且 text null", () => {
   const warm = "## 2026-09-20 [fact]\n\n老条目。\n<!-- last_access: 2026-09-20 08:00 -->\n";
   const { text, touched } = touchWarmAccessText(warm, "不存在的片段", "2026-09-30 00:00");

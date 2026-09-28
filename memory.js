@@ -43,15 +43,22 @@ export function sortWarmByAccess(entries) {
   });
 }
 
+/** 匹配前剥掉 markdown 格式标记（**、*、`），避免模型选的 ref 跨标记匹配失败。 */
+export function normalizeForMatch(text) {
+  return text.replace(/[*`]+/g, "");
+}
+
 /** 标记 warm 中「被用到」的条目（block 包含 ref 片段）刷新 last_access。
- *  读≠用：只有显式 touch 才算被调用=活跃。返回 { text, touched }；无变化 text=null。 */
+ *  读≠用：只有显式 touch 才算被调用=活跃。返回 { text, touched }；无变化 text=null。
+ *  匹配时双方先剥 markdown 标记（normalizeForMatch），写盘保留原文。 */
 export function touchWarmAccessText(warm, ref, stamp) {
   const entries = parseWarm(warm);
-  if (!entries.length || !ref) return { text: null, touched: 0 };
+  const key = ref ? normalizeForMatch(ref).trim() : "";
+  if (!entries.length || !key) return { text: null, touched: 0 };
   let changed = false;
   let touched = 0;
   const blocks = entries.map((e) => {
-    if (!e.block.includes(ref)) return e.block;
+    if (!normalizeForMatch(e.block).includes(key)) return e.block;
     touched += 1;
     if (!/<!-- last_access: [^>]+ -->/.test(e.block)) {
       changed = true;
