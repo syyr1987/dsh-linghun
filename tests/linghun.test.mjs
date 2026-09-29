@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_IDENTITY, DEFAULT_JUDGMENT, DEFAULT_USER_CARD, ARCHITECTURE_PRIORITY, resolveIdentity } from "../identity.js";
-import { createMemoryLayout, parseWarm, renderWarmEntries, sortWarmByAccess, sortWarmForInject, touchWarmAccessText, findWarmEntryRef, replaceWarmEntryText, markWrongWarmEntryText, findNearDuplicateWarm } from "../memory.js";
+import { createMemoryLayout, parseWarm, renderWarmEntries, summarizeWarmForCold, truncateKeepHead, sortWarmByAccess, sortWarmForInject, touchWarmAccessText, findWarmEntryRef, replaceWarmEntryText, markWrongWarmEntryText, findNearDuplicateWarm } from "../memory.js";
 import { Config, NS, apply, inject, name, parseAssessment } from "../index.js";
 
 // ── identity.js ─────────────────────────────────────────────────────────
@@ -117,15 +117,15 @@ test("memory: warm 有内容时注入包含近期记忆", () => {
   assert.ok(out.includes("用户喜欢短句"));
 });
 
-test("memory: cold + warm + episodic 索引按序渲染", () => {
+test("memory: warm + cold + episodic 索引按序渲染（近期记忆优先）", () => {
   const { root, track, layout } = makeLayout();
   mkdirSync(join(root, "episodic"), { recursive: true });
   track(join(root, "cold.md"), "# 冷储\n\n规则：先查证再下结论。\n");
   track(join(root, "warm.md"), "## 2026-09-21 [decision]\n\n决定全开源。\n");
   writeFileSync(join(root, "episodic", "2026-09-20.md"), "沉淀条目 A\n");
   const out = layout.renderForInject(6000);
-  assert.ok(out.indexOf("冷储") < out.indexOf("近期记忆"));
-  assert.ok(out.indexOf("近期记忆") < out.indexOf("归档索引"));
+  assert.ok(out.indexOf("近期记忆") < out.indexOf("冷储"));
+  assert.ok(out.indexOf("冷储") < out.indexOf("归档索引"));
   assert.ok(out.includes("2026-09-20"));
 });
 
@@ -592,4 +592,157 @@ test("index: 素材包文件不可读时回退默认注入（不崩溃）", () =
   const out = mem.text();
   assert.equal(typeof out, "string");
   assert.ok(!out.includes("undefined"), "不可读路径不得渲染 undefined");
+});
+
+// ── 阿澄自检报告缺陷修复（v0.2.11）：F1-F5 回归 ────────────────────────────
+test("fix: summarizeWarmForCold 摘要化（wrong 跳过 / high 前缀 / 首行截断）", () => {
+  const warm = [
+    "## 2026-09-28 [fact] high\n\nOpenWeather key 已配置，sprint 2 截止 2026-09-30。\n第二行细节不该进摘要。",
+    "## 2026-09-27 [decision] medium\n\n决定全开源，社区反馈走 Discussions。",
+    "## 2026-09-26 [fact] wrong\n\n已翻转的旧事实，不得进摘要。",
+  ].join("\n\n");
+  const lines = summarizeWarmForCold(warm);
+  assert.equal(lines.length, 2);
+  assert.ok(lines[0].startsWith("- [high] "));
+  assert.ok(lines[0].includes("OpenWeather key 已配置"));
+  assert.ok(!lines[0].includes("第二行"), "只取首行锚点，不倾倒多行正文");
+  assert.ok(lines[1].startsWith("- 决定全开源"));
+  assert.ok(!lines.some((l) => l.includes("已翻转")), "wrong 条目跳过");
+});
+
+test("fix: truncateKeepHead 按条目边界截断，不切在字符中间", () => {
+  const text = "条目一内容\n\n条目二内容\n\n条目三内容";
+  const head = truncateKeepHead(text, 10);
+  assert.equal(head, "条目一内容");
+  assert.ok(!head.includes("条目二"), "超限停在完整条目边界");
+  const single = truncateKeepHead("超长单块内容".repeat(50), 10);
+  assert.ok(single.includes("(截断)"));
+  assert.equal(truncateKeepHead(text, 0), "");
+  assert.equal(truncateKeepHead(text, 9999), text);
+});
+
+test("fix: renderForInject 保暖态——冷储超预算不挤掉暖态（F4）", () => {
+  const { root, track, layout } = makeLayout();
+  track(join(root, "cold.md"), "冷储规则：" + "X".repeat(3000));
+  track(join(root, "warm.md"), "## 2026-09-28 [fact]\n\n近期关键记忆内容。");
+  const out = layout.renderForInject(500);
+  assert.ok(out.includes("近期关键记忆内容"), "暖态必须完整保留");
+  assert.ok(out.includes("超出注入上限"), "仍有超限提示");
+  assert.ok(out.length < 700);
+});
+
+test("conf: warm maxBytes 默认与注入预算同量级（F5）", () => {
+  const parsed = Config(undefined);
+  assert.equal(parsed.memory.maxBytes, 64 * 1024);
+});
+
+function harnessCollect(config) {
+  const sections = [];
+  const tools = [];
+  const listeners = [];
+  const ctx = {
+    systemPrompt: { section: (s) => { sections.push(s); return () => {}; } },
+    effect: (cb) => cb(),
+    inject: () => {},
+    tools: { register: (def) => tools.push(def) },
+    on: (evt, cb) => listeners.push({ evt, cb }),
+  };
+  const oldHome = process.env.HOME;
+  const home = mkdtempSync(join(tmpdir(), "linghun-reg-"));
+  process.env.HOME = home;
+  try {
+    apply(ctx, Config(config));
+  } finally {
+    process.env.HOME = oldHome;
+  }
+  return {
+    sections, tools, listeners, home,
+    // 在 HOME=home 有效期内执行同步触发（resolveDshHome 惰性读取 os.homedir()）
+    withEnv(fn) {
+      const prev = process.env.HOME;
+      process.env.HOME = home;
+      try { return fn(); } finally { process.env.HOME = prev; }
+    },
+    // 异步版：保持 HOME 直到 fn 完成（consolidate 等 execute 内部惰性求值 memoryDir）
+    async withEnvAsync(fn) {
+      const prev = process.env.HOME;
+      process.env.HOME = home;
+      try { return await fn(); } finally { process.env.HOME = prev; }
+    },
+  };
+}
+
+const turnEvents = [
+  { type: "turn/start", seq: 0, data: {} },
+  { type: "user/message", seq: 1, data: { content: [{ type: "text", text: "真实用户消息" }], source: { kind: "user" } } },
+  { type: "user/message", seq: 2, data: { content: [{ type: "text", text: "插件注入的运行时上下文" }], source: { kind: "plugin", plugin: "other" } } },
+  { type: "assistant/message", seq: 3, data: { message: { content: [{ type: "text", text: "助手回答" }] } } },
+];
+
+function readJournal(home, day) {
+  const f = join(home, ".dsh", "linghun", "memory", "journal", `${day}.md`);
+  try {
+    return readFileSync(f, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+test("fix: 收尾序时账——snapshotEvents 契约下正常写入且跳过插件注入（F1+F2）", () => {
+  const { listeners, home, withEnv } = harnessCollect(undefined);
+  const cb = listeners.find((l) => l.evt === "session/event").cb;
+  const session = { snapshotEvents: () => turnEvents };
+  withEnv(() => cb(session, { type: "turn/end" }));
+  const day = new Date().toISOString().slice(0, 10);
+  const j = readJournal(home, day);
+  assert.ok(j, "序时账文件应写入");
+  assert.ok(j.includes("真实用户消息"));
+  assert.ok(j.includes("助手回答"));
+  assert.ok(!j.includes("插件注入的运行时上下文"), "plugin kind 的注入应被跳过");
+});
+
+test("fix: 收尾序时账——旧契约 log/events 兼容（F1 防御性）", () => {
+  const { listeners, home, withEnv } = harnessCollect(undefined);
+  const cb = listeners.find((l) => l.evt === "session/event").cb;
+  const session = { log: turnEvents };
+  withEnv(() => cb(session, { type: "turn/end" }));
+  const day = new Date().toISOString().slice(0, 10);
+  const j = readJournal(home, day);
+  assert.ok(j && j.includes("真实用户消息"), "log 字段兼容路径应写入");
+});
+
+test("fix: memory_consolidate 同日二次 append 不覆盖（F3）", async () => {
+  const { tools, home, withEnvAsync } = harnessCollect(undefined);
+  const memDir = join(home, ".dsh", "linghun", "memory");
+  const warmFile = join(memDir, "warm.md");
+  const consolidated = tools.find((t) => t.name === "memory_consolidate");
+  assert.ok(consolidated, "应注册 memory_consolidate 工具");
+  await withEnvAsync(async () => {
+    mkdirSync(memDir, { recursive: true });
+    writeFileSync(warmFile, "## 2026-09-29 [fact]\n\n第一批沉淀内容。\n", "utf8");
+    await consolidated.execute({}, {});
+    writeFileSync(warmFile, "## 2026-09-29 [decision]\n\n第二批沉淀内容。\n", "utf8");
+    await consolidated.execute({}, {});
+  });
+  const day = new Date().toISOString().slice(0, 10);
+  const ep = readFileSync(join(memDir, "episodic", `${day}.md`), "utf8");
+  assert.ok(ep.includes("第一批沉淀内容"), "第一次归档必须保留");
+  assert.ok(ep.includes("第二批沉淀内容"), "第二次归档必须追加而非覆盖");
+  assert.ok((ep.match(/^## \d\d:\d\d/gm) ?? []).length === 2, "按时刻分段出现两次");
+});
+
+test("fix: 沉淀后 cold 只含摘要与指针，不倾倒原文（F4）", async () => {
+  const { tools, home, withEnvAsync } = harnessCollect(undefined);
+  const memDir = join(home, ".dsh", "linghun", "memory");
+  const warmFile = join(memDir, "warm.md");
+  const consolidated = tools.find((t) => t.name === "memory_consolidate");
+  await withEnvAsync(async () => {
+    mkdirSync(memDir, { recursive: true });
+    writeFileSync(warmFile, "## 2026-09-29 [fact] high\n\n核心知识细节很长，" + "Y".repeat(500) + "\n", "utf8");
+    await consolidated.execute({}, {});
+  });
+  const cold = readFileSync(join(memDir, "cold.md"), "utf8");
+  assert.ok(cold.includes("- [high] "), "cold 应为锚点摘要行");
+  assert.ok(cold.includes("全文见 episodic/"), "cold 应带全文指针");
+  assert.ok(!cold.includes("Y".repeat(500)), "cold 不得包含 warm 正文细节");
 });

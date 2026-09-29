@@ -188,6 +188,39 @@ export function touchWarmAccessText(warm, ref, stamp) {
  * @param root     记忆根目录（函数或字符串）
  * @param readText 读取函数，缺失时返回 null（可带 mtime 缓存）
  */
+/** 冷储摘要：把暖态原文压成「每条一行」的锚点（F4：cold 只放摘要，不倾倒原文）。
+ *  返回行数组；wrong（被翻转）条目跳过。 */
+export function summarizeWarmForCold(warmText) {
+  const entries = parseWarm(String(warmText ?? "")).filter((e) => e.confidence !== "wrong");
+  return entries.map((e) => {
+    const body = e.block.replace(/\n?<!-- last_access: [^>]+ -->/, "").trim();
+    const bodyLines = body.split("\n").map((l) => l.trim()).filter(Boolean);
+    const contentLine = bodyLines.find((l) => !l.startsWith("##")) ?? bodyLines[0] ?? "";
+    const brief = contentLine.replace(/\s+/g, " ").slice(0, 60);
+    const tag = e.confidence === "high" ? "[high] " : e.confidence === "low" ? "[low] " : "";
+    return `- ${tag}${brief}`;
+  });
+}
+
+/** 从前往后按条目边界截断（\n\n 分块），不切在字符中间；单块本身超限才字符截断。
+ *  返回保留下来的头段；cap<=0 或放不下任何块时返回空串（调用方据此停止）。 */
+export function truncateKeepHead(text, cap) {
+  if (cap <= 0) return "";
+  if (text.length <= cap) return text;
+  const blocks = String(text).split(/\n\n/);
+  const out = [];
+  let used = 0;
+  for (const b of blocks) {
+    if (used + b.length > cap) {
+      if (!out.length) return `${b.slice(0, cap)}\n…(截断)…`;
+      break;
+    }
+    out.push(b);
+    used += b.length + 2;
+  }
+  return out.join("\n\n");
+}
+
 export function createMemoryLayout(root, readText) {
   const memoryRoot = () => (typeof root === "function" ? root() : root);
 
@@ -284,7 +317,8 @@ export function createMemoryLayout(root, readText) {
         warm = renderWarmEntries(entries);
       }
       const parts = [];
-      if (cold.trim()) parts.push(cold.trim());
+      // 近期记忆优先：冷储可压缩、可裁剪，暖态必须是注入的主角
+      // （F4：冷储超预算不得把暖态整段挤掉——注入看不到近期记忆 = 数据丢失）
       if (warm.trim()) {
         const lowExists = /【低置信·需验证】/.test(warm);
         const note = lowExists
@@ -292,6 +326,7 @@ export function createMemoryLayout(root, readText) {
           : "";
         parts.push(`## 近期记忆 / Recent\n${note}\n${warm.trim()}`);
       }
+      if (cold.trim()) parts.push(cold.trim());
       if (episodes.length) {
         const rows = episodes
           .map((e) => `- ${e.name}${e.title ? ` — ${e.title}` : ""}`)
@@ -306,7 +341,19 @@ export function createMemoryLayout(root, readText) {
       if (!rendered) return "";
       const cap = Math.max(0, Math.floor(maxChars ?? 6000));
       if (rendered.length <= cap) return rendered;
-      return `${rendered.slice(0, cap)}\n\n> 记忆超出注入上限，可用 memory_read 读取全文。`;
+      // 段边界 + 条目边界截断：从前往后保留完整段落/条目，超限处停并提示，不切在字符中间
+      const kept = [];
+      let used = 0;
+      for (const part of parts) {
+        const remain = cap - used;
+        if (remain <= 0) break;
+        const head = truncateKeepHead(part, remain);
+        if (!head) break;
+        kept.push(head);
+        used += head.length + 2;
+        if (head.length < part.length) break;
+      }
+      return `${kept.join("\n\n")}\n\n> 记忆超出注入上限，可用 memory_read 读取全文。`;
     },
   };
 }

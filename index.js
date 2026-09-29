@@ -20,7 +20,7 @@ import z from "@deepseek-ai/schemastery";
 import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { DEFAULT_IDENTITY, DEFAULT_JUDGMENT, DEFAULT_USER_CARD, MEMORY_DISCIPLINE, resolveIdentity } from "./identity.js";
-import { createMemoryLayout, parseWarm, renderWarmEntries, touchWarmAccessText, findWarmEntryRef, replaceWarmEntryText, markWrongWarmEntryText, findNearDuplicateWarm } from "./memory.js";
+import { createMemoryLayout, parseWarm, renderWarmEntries, summarizeWarmForCold, touchWarmAccessText, findWarmEntryRef, replaceWarmEntryText, markWrongWarmEntryText, findNearDuplicateWarm } from "./memory.js";
 
 const name = "linghun";
 const inject = ["systemPrompt", "tools"];
@@ -67,7 +67,9 @@ const Config = z.object({
     /** 时间权重：暖态注入按 last_access（最后一次被调用）新→旧排序，吃灰的沉底被裁出注入。 */
     timeWeight: z.boolean().default(true),
     /** warm.md 上限（字节），超出先 consolidate。 */
-    maxBytes: z.number().default(1024 * 1024),
+    /** 暖态记忆体积上限：与注入预算（injectMaxChars 默认 6000 字）同量级对齐，
+     *  避免 warm 可合法涨到 1MB 而 98% 结构性进不了注入（F5：autoConsolidate 死代码）。 */
+    maxBytes: z.number().default(64 * 1024),
     /** 收尾评估：每轮对话结束由工程强制触发一次「有没有值得沉淀」的 LLM 评估，不依赖模型自觉。 */
     assessment: z.object({
       enabled: z.boolean().default(true),
@@ -305,19 +307,28 @@ function apply(ctx, config) {
   const todayName = () => nowStamp().slice(0, 10);
 
   // ── 海马体：记 / 读 / 沉淀 ──────────────────────────────────────────────
-  /** 归档暖态 → episodic/<日期>.md + 冷储摘要，然后清空暖态。工程层可复用（阈值沉淀/收尾评估共用）。 */
+  /** 归档暖态 → episodic/<日期>.md + 冷储摘要，然后清空暖态。工程层可复用（阈值沉淀/收尾评估共用）。
+   *  F3：episodic 用 append + 按时刻分段——同日多次沉淀不覆盖；
+   *  F4：cold 只写「每条一行的锚点摘要 + 全文指针」，不倾倒 warm 原文（注入预算不被冷储吃光）。 */
   const doConsolidate = async () => {
     const warm = layout.readWarm();
     if (!warm.trim()) return { archived: 0, warmCleared: true };
-    const episodicFile = join(layout.episodicDir(), `${todayName()}.md`);
+    const stamp = nowStampSec(); // YYYY-MM-DD HH:MM:SS
+    const day = stamp.slice(0, 10);
+    const hm = stamp.slice(11, 16); // HH:MM
+    const episodicFile = join(layout.episodicDir(), `${day}.md`);
     const cold = layout.readCold();
-    const coldNext = [cold.trim(), `## ${todayName()} 沉淀\n\n${warm.trim()}`]
-      .filter(Boolean)
-      .join("\n\n");
+    const lines = summarizeWarmForCold(warm);
+    const coldNext = [
+      cold.trim(),
+      `## ${day} 沉淀（${lines.length} 条）`,
+      ...lines,
+      `（全文见 episodic/${day}.md）`,
+    ].filter(Boolean).join("\n");
     await ensureParent(episodicFile);
-    await writeFile(episodicFile, warm.trim() + "\n", "utf8");
+    await appendFile(episodicFile, `\n## ${hm}\n\n${warm.trim()}\n`, "utf8");
     await ensureParent(layout.coldFile());
-    await writeFile(layout.coldFile(), coldNext + "\n", "utf8");
+    await appendFile(layout.coldFile(), `\n\n${coldNext}\n`, "utf8");
     await writeFile(layout.warmFile(), "", "utf8");
     fileCache.delete(episodicFile);
     fileCache.delete(layout.coldFile());
@@ -638,7 +649,12 @@ function apply(ctx, config) {
   // 写与沉淀在这里由代码保证：turn/end 时评估一次，warm 超阈值时自动归档。
   let lastModel = { provider: "", model: "" };
   const collectTurnTranscript = (session) => {
-    const events = session.log ?? session.events ?? [];
+    // 防御性事件获取：新版 DSH Session 契约用 snapshotEvents()（Inspect 形态），
+    // 旧版暴露 log / events 字段。兼容两者，取不到就空转（收尾序时账不阻塞主流程）。
+    const events =
+      typeof session?.snapshotEvents === "function"
+        ? session.snapshotEvents()
+        : (session?.log ?? session?.events ?? []);
     // 以最后一个 turn/start 为边界，只收集本轮的用户/助手可见消息
     let turnStartSeq = -1;
     for (let i = events.length - 1; i >= 0; i--) {
@@ -662,9 +678,10 @@ function apply(ctx, config) {
     for (const ev of events) {
       if (ev.seq < turnStartSeq) continue;
       if (ev.type === "user/message") {
-        // 跳过运行时上下文注入（runtime context / 系统注入），只保留真实用户消息
+        // 跳过运行时上下文/插件注入与模型侧注入，只保留真实用户消息
+        // （MessageSource.kind 合法枚举：user / plugin / model / tool；runtime-context 不存在）
         const src = ev.data?.source;
-        if (src?.kind === "runtime-context" || src?.kind === "model") continue;
+        if (src?.kind === "plugin" || src?.kind === "model") continue;
         const t = textOf(ev);
         if (t) lines.push(`用户：${t}`);
       } else if (ev.type === "assistant/message") {
