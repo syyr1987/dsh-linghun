@@ -92,9 +92,10 @@ Both can be tuned under the `linghun.memory.assessment` / `linghun.memory.autoCo
 ## Roadmap
 
 - **v0.1.0** (done): identity + judgment + hippocampus
-- **v0.2.0** (current): engineering memory guardrails — end-of-turn assessment + threshold auto-consolidation
-- **v0.3.0**: LLM-distilled cold storage (checkpoint → episodic → knowledge with real summarization)
-- **v0.4.0**: dual-instance mutual verification (criteria source bound to the verifier)
+- **v0.2.0** (done): engineering memory guardrails — end-of-turn assessment + threshold auto-consolidation
+- **v0.3.0** (current): miss-verification discipline — "candidate not hit" in material ≠ memory has none; verify cold storage for factual queries; converge by question type for identity/background
+- **v0.4.0**: LLM-distilled cold storage (checkpoint → episodic → knowledge with real summarization)
+- **v0.5.0**: dual-instance mutual verification (criteria source bound to the verifier)
 
 ## Design philosophy
 
