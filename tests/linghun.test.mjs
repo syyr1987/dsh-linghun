@@ -638,6 +638,51 @@ test("conf: warm maxBytes 默认与注入预算同量级（F5）", () => {
   assert.equal(parsed.memory.maxBytes, 64 * 1024);
 });
 
+// ── 团队认知台账（assembler 认知循环团队共享，v0.2.14）─────────────────────
+test("team: memory_read 含团队认知台账段（共享子智能体领域）", async () => {
+  const { tools, dshHome, withEnvAsync } = harnessCollect(undefined);
+  const read = tools.find((t) => t.name === "memory_read");
+  assert.ok(read, "应注册 memory_read 工具");
+
+  const teamDir = join(dshHome, "linghun", "memory", "team");
+  mkdirSync(join(teamDir, "archivist", "timelines"), { recursive: true });
+  writeFileSync(
+    join(teamDir, "cycle.json"),
+    JSON.stringify({
+      version: 1,
+      turnCount: 12,
+      judgeStats: { light: 3, medium: 5, deep: 4, strategy: {} },
+      feedback: { hits: 6, misses: 3, lastAt: null, recent: [] },
+      gaps: [{ query: "冷门事实A" }, { query: "冷门事实B" }],
+      createdAt: "2026-09-29T00:00:00.000Z",
+      updatedAt: "2026-09-29T00:00:00.000Z",
+    }),
+    "utf8",
+  );
+  writeFileSync(join(teamDir, "gaps.md"), "- 2026-09-29 提到「冷门事实A」，记忆无命中\n", "utf8");
+  writeFileSync(
+    join(teamDir, "archivist", "timelines", "index.json"),
+    JSON.stringify([{ topic: "项目来龙去脉", stamp: "2026-09-29", finding: "脉络。" }]),
+    "utf8",
+  );
+
+  const out = await withEnvAsync(() => read.execute({}, {}));
+  assert.ok(out.exists);
+  assert.ok(out.content.includes("团队认知台账"), "应包含团队台账段");
+  assert.ok(out.content.includes("回合 12"), "应含判官回合统计");
+  assert.ok(out.content.includes("命中 6 / 未命中 3"), "应含反馈校准统计");
+  assert.ok(out.content.includes("缺口 2 条"), "应含缺口登记");
+  assert.ok(out.content.includes("史官已梳理"), "应含史官领域摘要");
+  assert.ok(out.content.includes("项目来龙去脉"), "史官缓存 topic 应可共享");
+});
+
+test("team: memory_read 无团队文件时正常（不出现团队段）", async () => {
+  const { tools, withEnvAsync } = harnessCollect(undefined);
+  const read = tools.find((t) => t.name === "memory_read");
+  const out = await withEnvAsync(() => read.execute({}, {}));
+  assert.ok(!out.content.includes("团队认知台账"), "无团队文件不得渲染团队段");
+});
+
 function harnessCollect(config) {
   const sections = [];
   const tools = [];

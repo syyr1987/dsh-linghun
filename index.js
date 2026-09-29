@@ -164,6 +164,54 @@ function apply(ctx, config) {
   const identityFile = () => join(resolveDshHome(), IDENTITY_FILE);
   const layout = createMemoryLayout(memoryDir, readCached);
 
+  // 团队认知台账（assembler 认知循环团队共享；缺失/损坏跳过，只读）。
+  // 子智能体的领域工作区 = $DSH_HOME/linghun/memory/team/，主智能体经此共享认知产物。
+  const readTeamLedger = () => {
+    const tdir = join(memoryDir(), "team");
+    const cycRaw = readCached(join(tdir, "cycle.json"));
+    const gapsRaw = readCached(join(tdir, "gaps.md"));
+    const tlRaw = readCached(join(tdir, "archivist", "timelines", "index.json"));
+    const rows = [];
+    if (cycRaw) {
+      try {
+        const cyc = JSON.parse(cycRaw);
+        if (cyc && typeof cyc === "object") {
+          const s = cyc.judgeStats ?? {};
+          const f = cyc.feedback ?? {};
+          rows.push(
+            `- 回合 ${cyc.turnCount ?? 0} · 判官：light ${s.light ?? 0} / medium ${s.medium ?? 0} / deep ${s.deep ?? 0}`,
+          );
+          rows.push(`- 反馈：命中 ${f.hits ?? 0} / 未命中 ${f.misses ?? 0}`);
+          const gaps = Array.isArray(cyc.gaps) ? cyc.gaps : [];
+          if (gaps.length) {
+            const head = gaps.slice(-3).map((g) => `「${g.query ?? ""}」`).join("、");
+            rows.push(`- 缺口 ${gaps.length} 条，最近：${head}`);
+          }
+        }
+      } catch {
+        /* cycle.json 损坏跳过 */
+      }
+    }
+    if (gapsRaw) {
+      const lines = String(gapsRaw).split("\n").map((l) => l.trim()).filter(Boolean).slice(-3);
+      if (lines.length && !rows.some((r) => r.startsWith("- 缺口"))) {
+        rows.push(`- gaps.md 尾部：${lines.join("；")}`);
+      }
+    }
+    if (tlRaw) {
+      try {
+        const tl = JSON.parse(tlRaw);
+        if (Array.isArray(tl) && tl.length) {
+          const topics = tl.slice(-5).map((e) => `${e.topic ?? "?"}（${e.stamp ?? ""}）`).join("、");
+          rows.push(`- 史官已梳理：${topics}`);
+        }
+      } catch {
+        /* 缓存损坏跳过 */
+      }
+    }
+    return rows.length ? `## 团队认知台账 / Team\n${rows.join("\n")}` : "";
+  };
+
   // ── prompt sections（function text：按 assembly 动态解析）──────────────
   const renderIdentity = () => {
     const c = cfg();
@@ -524,6 +572,8 @@ function apply(ctx, config) {
           .join("\n");
         parts.push(`## 归档索引 / Archive\n${rows}`);
       }
+      const team = readTeamLedger();
+      if (team) parts.push(team);
       const full = parts.join("\n\n");
       if (!full.trim()) return { exists: false, bytes: 0, content: "" };
       const limit = useFull ? 50000 : max;
