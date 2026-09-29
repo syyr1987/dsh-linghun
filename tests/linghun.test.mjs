@@ -365,13 +365,14 @@ test("index: 三个 prompt section 均关闭模板插值（interpolate:false，�
     tools: { register: () => {} },
     on: () => {},
   };
-  const oldHome = process.env.HOME;
-  process.env.HOME = mkdtempSync(join(tmpdir(), "linghun-test-home-"));
+  const oldHome = process.env.DSH_HOME;
+  const homeDir = mkdtempSync(join(tmpdir(), "linghun-test-home-"));
+  process.env.DSH_HOME = join(homeDir, ".dsh");
   try {
     apply(ctx, Config(undefined));
   } finally {
-    if (oldHome === undefined) delete process.env.HOME;
-    else process.env.HOME = oldHome;
+    if (oldHome === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = oldHome;
   }
   const names = sections.map((s) => s.name);
   for (const n of ["soul:identity", "soul:judgment", "soul:memory"]) {
@@ -528,13 +529,14 @@ function harnessWithSections(config) {
     tools: { register: () => {} },
     on: () => {},
   };
-  const oldHome = process.env.HOME;
-  process.env.HOME = mkdtempSync(join(tmpdir(), "linghun-asm-home-"));
+  const oldHome = process.env.DSH_HOME;
+  const homeDir = mkdtempSync(join(tmpdir(), "linghun-asm-home-"));
+  process.env.DSH_HOME = join(homeDir, ".dsh");
   try {
     apply(ctx, config);
   } finally {
-    if (oldHome === undefined) delete process.env.HOME;
-    else process.env.HOME = oldHome;
+    if (oldHome === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = oldHome;
   }
   return sections;
 }
@@ -647,27 +649,33 @@ function harnessCollect(config) {
     tools: { register: (def) => tools.push(def) },
     on: (evt, cb) => listeners.push({ evt, cb }),
   };
-  const oldHome = process.env.HOME;
+  const oldDshHome = process.env.DSH_HOME;
   const home = mkdtempSync(join(tmpdir(), "linghun-reg-"));
-  process.env.HOME = home;
+  // 跨平台隔离：设 DSH_HOME（resolveDshHome 优先级高于 os.homedir()）。
+  // 不要只设 HOME——Windows 的 os.homedir() 读 USERPROFILE 不读 HOME，测试会写真实记忆（阿澄复查 N1/N2）。
+  const dshHome = join(home, ".dsh");
+  const setEnv = (on) => {
+    if (on) process.env.DSH_HOME = dshHome;
+    else if (oldDshHome === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = oldDshHome;
+  };
+  setEnv(true);
   try {
     apply(ctx, Config(config));
   } finally {
-    process.env.HOME = oldHome;
+    setEnv(false);
   }
   return {
-    sections, tools, listeners, home,
-    // 在 HOME=home 有效期内执行同步触发（resolveDshHome 惰性读取 os.homedir()）
+    sections, tools, listeners, home, dshHome,
+    // 在 DSH_HOME=dshHome 有效期内执行同步触发（resolveDshHome 惰性读取 env）
     withEnv(fn) {
-      const prev = process.env.HOME;
-      process.env.HOME = home;
-      try { return fn(); } finally { process.env.HOME = prev; }
+      setEnv(true);
+      try { return fn(); } finally { setEnv(false); }
     },
-    // 异步版：保持 HOME 直到 fn 完成（consolidate 等 execute 内部惰性求值 memoryDir）
+    // 异步版：保持 DSH_HOME 直到 fn 完成（consolidate 等 execute 内部惰性求值 memoryDir）
     async withEnvAsync(fn) {
-      const prev = process.env.HOME;
-      process.env.HOME = home;
-      try { return await fn(); } finally { process.env.HOME = prev; }
+      setEnv(true);
+      try { return await fn(); } finally { setEnv(false); }
     },
   };
 }
