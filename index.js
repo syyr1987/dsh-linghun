@@ -180,8 +180,11 @@ function apply(ctx, config) {
   const renderMemory = () => {
     const c = cfg();
     if (c.memory?.enabled === false || c.memory?.inject === false) return "";
-    // 组装模式（提取侧子智能体）：配置 injectPath 或环境变量指定素材包路径 → 注入素材包（替代 warm 原文，不带纪律）
-    const asmPath = (c.memory?.assembler?.injectPath ?? "").trim() || process.env.LINGHUN_MEMORY_OVERRIDE || "";
+    // 组装模式（提取侧子智能体）：配置 injectPath / 环境变量 / 默认约定路径（与 assembler 侧零配置联动）
+    const asmPath =
+      (c.memory?.assembler?.injectPath ?? "").trim() ||
+      process.env.LINGHUN_MEMORY_OVERRIDE ||
+      join(resolveDshHome(), "linghun", "memory", "assembled.md");
     if (asmPath) {
       try {
         const text = readFileSync(asmPath, "utf8").trim();
