@@ -12,8 +12,16 @@ and experience keeps flowing back into the next round. Endless planning is cut o
 - **Boundary discipline**: never force-precision on fuzzy concepts, never fake consistency on
   paradoxes, verify before asserting, never fabricate, and watch for "raise-the-cost-of-refusal" wording.
 - **Cognition loop**: judgment has a source, feedback has attribution, improvement keeps its chain.
-- **Hippocampus**: warm memory for recent facts → consolidation into episodic archive → injected
-  summary, so the same pit is not stepped into twice.
+- **Hippocampus (three-layer memory)**: warm buffer for recent facts → consolidation into
+  episodic archive (same-day appends, never overwrites) → cold summary injected, so the same
+  pit is not stepped into twice.
+- **Chronological ledger (序时账)**: `journal_read` returns the raw conversation ledger, archived
+  by day — trace exactly what was said when, complementing the forgetful warm layer.
+- **Confidence-weighted forgetting**: every entry carries a confidence tag (high/medium/low).
+  Low-confidence entries inject with a 【需验证】 marker; entries overturned (`wrong`) are
+  flipped and excluded from injection — degraded confidence is a form of forgetting.
+- **A2A memory team (linghun-assembler)**: share the cognitive-cycle team's ledger — judge
+  records, editor deliveries, archivist timelines — into the main brain via `memory_read`.
 - **Self-evolution**: the agent reads and updates its own soul card via `soul_read` / `soul_update`.
 
 ## Install
