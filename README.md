@@ -108,4 +108,4 @@ What can be mechanized should not be left to improvisation.
 
 ## License
 
-MIT © 2026 山越野人 & 岚客
+GPL-3.0 © 2026 山越野人 & 岚客
