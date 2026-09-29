@@ -171,6 +171,8 @@ function apply(ctx, config) {
     const cycRaw = readCached(join(tdir, "cycle.json"));
     const gapsRaw = readCached(join(tdir, "gaps.md"));
     const tlRaw = readCached(join(tdir, "archivist", "timelines", "index.json"));
+    const judgeRaw = readCached(join(tdir, "judge", "history.jsonl"));
+    const bundlesRaw = readCached(join(tdir, "editor", "bundles.jsonl"));
     const rows = [];
     if (cycRaw) {
       try {
@@ -207,6 +209,39 @@ function apply(ctx, config) {
         }
       } catch {
         /* 缓存损坏跳过 */
+      }
+    }
+    if (judgeRaw) {
+      const recs = [];
+      for (const l of String(judgeRaw).split("\n").map((x) => x.trim()).filter(Boolean).slice(-5)) {
+        try {
+          recs.push(JSON.parse(l));
+        } catch {
+          /* 坏行跳过 */
+        }
+      }
+      if (recs.length) {
+        const head = recs
+          .slice(-3)
+          .map((r) => `${r.level ?? "?"}(${r.strategy ?? "general"})「${String(r.query ?? "").slice(0, 18)}」`)
+          .join("、");
+        rows.push(`- 判官履历 ${recs.length} 条，最近：${head}`);
+      }
+    }
+    if (bundlesRaw) {
+      const recs = [];
+      for (const l of String(bundlesRaw).split("\n").map((x) => x.trim()).filter(Boolean).slice(-3)) {
+        try {
+          recs.push(JSON.parse(l));
+        } catch {
+          /* 坏行跳过 */
+        }
+      }
+      if (recs.length) {
+        const head = recs
+          .map((r) => `${r.entryCount ?? 0} 条${r.timeline ? "+时序" : ""}「${String(r.query ?? "").slice(0, 14)}」`)
+          .join("、");
+        rows.push(`- 编辑已交付 ${recs.length} 次，最近：${head}`);
       }
     }
     return rows.length ? `## 团队认知台账 / Team\n${rows.join("\n")}` : "";

@@ -665,6 +665,18 @@ test("team: memory_read 含团队认知台账段（共享子智能体领域）",
     JSON.stringify([{ topic: "项目来龙去脉", stamp: "2026-09-29", finding: "脉络。" }]),
     "utf8",
   );
+  mkdirSync(join(teamDir, "judge"), { recursive: true });
+  writeFileSync(
+    join(teamDir, "judge", "history.jsonl"),
+    `${JSON.stringify({ at: "2026-09-29T00:00:00.000Z", turn: 11, query: "前一轮", level: "deep", strategy: "timeline", by: "code" })}\n${JSON.stringify({ at: "2026-09-29T00:00:01.000Z", turn: 12, query: "这个项目的来龙去脉", level: "deep", strategy: "timeline", by: "code" })}\n`,
+    "utf8",
+  );
+  mkdirSync(join(teamDir, "editor"), { recursive: true });
+  writeFileSync(
+    join(teamDir, "editor", "bundles.jsonl"),
+    `${JSON.stringify({ at: "2026-09-29T00:00:01.000Z", turn: 12, query: "这个项目的来龙去脉", level: "deep", strategy: "timeline", entryCount: 8, chars: 1200, timeline: true, advocate: false })}\n`,
+    "utf8",
+  );
 
   const out = await withEnvAsync(() => read.execute({}, {}));
   assert.ok(out.exists);
@@ -674,6 +686,10 @@ test("team: memory_read 含团队认知台账段（共享子智能体领域）",
   assert.ok(out.content.includes("缺口 2 条"), "应含缺口登记");
   assert.ok(out.content.includes("史官已梳理"), "应含史官领域摘要");
   assert.ok(out.content.includes("项目来龙去脉"), "史官缓存 topic 应可共享");
+  assert.ok(out.content.includes("判官履历"), "应含判官履历段");
+  assert.ok(out.content.includes("deep(timeline)「这个项目的来龙去脉」"), "判官履历最近一条可读");
+  assert.ok(out.content.includes("编辑已交付 1 次"), "应含编辑发布段");
+  assert.ok(out.content.includes("8 条+时序"), "编辑发布带条目数与来源标记");
 });
 
 test("team: memory_read 无团队文件时正常（不出现团队段）", async () => {
