@@ -1,6 +1,6 @@
 {
   "name": "dsh-linghun",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "终结 Agent 无限规划：认知循环让判断有来处、反馈有归因、规划必收口；海马体把经历沉淀为知识——序时账留痕、情景归档、低置信降权遗忘；联动 linghun-assembler A2A 记忆管理团队，让子智能体的判断履历反哺主脑。不是人设卡，是判断力——给 DeepSeek Harness 装上收口器。",
   "type": "module",
   "main": "index.js",
@@ -13,7 +13,7 @@
       "patch": "./cordis.patch.yml"
     },
     "compatibility": {
-      "dsh": ">=0.1.0-rc.7 <0.2.0",
+      "dsh": ">=0.1.0-rc.7 <0.3.0",
       "node": ">=20.18",
       "profiles": [
         "web"
@@ -52,9 +52,9 @@
     "@deepseek-ai/schemastery": "^3.18.1"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-home-paths": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-settings": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-tools": "^0.1.0-rc.7"
+    "@deepseek-ai/dsh-home-paths": "^0.1.0-rc.7 || ^0.2.0-rc.1",
+    "@deepseek-ai/dsh-settings": "^0.1.0-rc.7 || ^0.2.0-rc.1",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.7 || ^0.2.0-rc.1"
   },
   "scripts": {
     "test": "node --test tests/*.test.mjs"
