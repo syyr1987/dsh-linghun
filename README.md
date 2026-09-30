@@ -23,10 +23,12 @@ and experience keeps flowing back into the next round. Endless planning is cut o
 - **A2A memory team (linghun-assembler)**: share the cognitive-cycle team's ledger — judge
   records, editor deliveries, archivist timelines — into the main brain via `memory_read`.
 - **Self-evolution**: the agent reads and updates its own soul card via `soul_read` / `soul_update`.
-- **Censor (言官, judgment-consistency supervision)**: judgment/ruling scenes activate a
-  supervision disposition watching three drift classes (criteria / stance / criterion widening).
-  It admonishes only and never overrules; rejected admonitions land in a CONFIRMED table so
-  similar candidates are not raised again — **the Censor gets sharper over time**.
+- **Closer's judgment role (判分身份职责)**: judgment/ruling tasks get a one-line identity role inside
+  `soul:judgment` — keep criteria consistent, bind every verdict to its source, judge only by the rules,
+  never widen criteria to "seem useful", stop when the source of a criterion can't be stated. Drift
+  signals and miss-kill anchors live in the judgment domain ontology (consult on demand, not injected
+  every time). **No separate supervision mechanism** — low-pressure single-step judgment does not drift;
+  reliability comes from domain rules, not from a monitor.
 
 ## Install
 
@@ -68,9 +70,8 @@ name/content in DSH Settings → 灵魂 (Linghun).
 Prompt sections injected:
 
 - `soul:identity` — soul card (identity anchors: the Closer architecture)
-- `soul:judgment` — boundary scan discipline (six boundary classes)
+- `soul:judgment` — boundary scan discipline (six boundary classes) + the Closer's judgment role
 - `soul:memory` — cold summary + warm recent + archive index
-- `soul:yanguan` — Censor discipline (judgment-consistency supervision: 3 drift classes + 4-step admonition + CONFIRMED taming)
 
 Tools exposed:
 
@@ -81,12 +82,10 @@ Tools exposed:
 | `memory_consolidate` | Consolidate: warm → `episodic/<date>.md`, merge cold summary |
 | `soul_read` | Read your own soul card (who I am, my boundaries, my discipline) |
 | `soul_update` | Update your own soul card (fold stable traits into identity) |
-| `yanguan_audit` | Censor admonition: self-check a verdict against 3 drift signals (admonish only, never overrule) |
-| `yanguan_review` | Censor review ruling: overrule on right, reject with reason into the CONFIRMED table on wrong |
+| `journal_read` | Read the chronological ledger (raw conversation history, archived by day) |
 
 Memory lives in plain Markdown under `$DSH_HOME/linghun/memory/` — readable, searchable, git-friendly.
 The soul card is at `$DSH_HOME/linghun/identity.md` — also plain Markdown. Your persona is yours; edit it however you like.
-The Censor CONFIRMED table lives at `$DSH_HOME/linghun/yanguan/confirmed.md` — rejected admonitions are recorded there; similar candidates are not raised again.
 
 ## Engineering guardrails (v0.2)
 
@@ -102,7 +101,14 @@ Both can be tuned under the `linghun.memory.assessment` / `linghun.memory.autoCo
 - **v0.1.0** (done): identity + judgment + hippocampus
 - **v0.2.0** (done): engineering memory guardrails — end-of-turn assessment + threshold auto-consolidation
 - **v0.3.0** (done): miss-verification discipline — "candidate not hit" in material ≠ memory has none; verify cold storage for factual queries; converge by question type for identity/background
-- **v0.3.3** (current): Censor (verifier verification discipline) — same line as v0.3.0: model verification discipline → verifier verification discipline. Judgment scenes activate a supervision disposition watching three drift classes (criteria / stance / criterion widening); admonish only, never overrule; CONFIRMED table tames the Censor over time
+- **v0.3.3** (released, then revised in v0.3.4): Censor (verifier verification discipline) — shipped as a
+  supervision mechanism (3 drift classes + 4-step admonition + CONFIRMED taming). Benchmarked against a
+  9-case gold standard: **criterion-widening regex 100% false positives, drift-widening 43% false
+  positives, uniform miss-kills 0 detected** — judgment does not drift, so the monitor mechanism was
+  removed. The drift signals and miss-kill anchors moved into the judgment domain ontology
+- **v0.3.4** (current): the Censor reverts to a **one-line judgment identity role** inside
+  `soul:judgment` — no separate section, no `yanguan_audit` / `yanguan_review` tools, no CONFIRMED table.
+  Reliability rests on domain rules (R-J series), not on a supervision layer
 - **v0.4.0**: LLM-distilled cold storage (checkpoint → episodic → knowledge with real summarization)
 - **v0.5.0**: dual-instance mutual verification (criteria source bound to the verifier)
 
