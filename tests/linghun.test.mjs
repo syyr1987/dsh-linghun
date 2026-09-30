@@ -3,9 +3,9 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_IDENTITY, DEFAULT_JUDGMENT, DEFAULT_USER_CARD, ARCHITECTURE_PRIORITY, resolveIdentity } from "../identity.js";
+import { DEFAULT_IDENTITY, DEFAULT_JUDGMENT, DEFAULT_USER_CARD, DEFAULT_YANGUAN, ARCHITECTURE_PRIORITY, resolveIdentity, CONFIRMED_FILE, YANGUAN_DIR } from "../identity.js";
 import { createMemoryLayout, parseWarm, renderWarmEntries, summarizeWarmForCold, truncateKeepHead, sortWarmByAccess, sortWarmForInject, touchWarmAccessText, findWarmEntryRef, replaceWarmEntryText, markWrongWarmEntryText, findNearDuplicateWarm } from "../memory.js";
-import { Config, NS, apply, inject, name, parseAssessment } from "../index.js";
+import { Config, NS, SECTION_YANGUAN, apply, inject, name, parseAssessment } from "../index.js";
 
 // ── identity.js ─────────────────────────────────────────────────────────
 test("identity: 默认灵魂卡包含收口者身份锚点", () => {
@@ -814,4 +814,108 @@ test("fix: 沉淀后 cold 只含摘要与指针，不倾倒原文（F4）", asyn
   assert.ok(cold.includes("- [high] "), "cold 应为锚点摘要行");
   assert.ok(cold.includes("全文见 episodic/"), "cold 应带全文指针");
   assert.ok(!cold.includes("Y".repeat(500)), "cold 不得包含 warm 正文细节");
+});
+
+// ── 言官（v0.3.3）────────────────────────────────────────────────────────
+/** 构造收集 ctx，注册插件后返回注册的工具列表（apply 是同步注册）。
+ *  注意：设置 DSH_HOME 到临时目录且不恢复——言官工具 execute 时需按同一路径读写 CONFIRMED 表；
+ *  本测试块位于文件末尾，进程结束临时目录自然销毁。 */
+function collectTools() {
+  const tools = [];
+  const ctx = {
+    systemPrompt: { section: () => () => {} },
+    effect: (cb) => cb(),
+    inject: () => {},
+    tools: { register: (t) => tools.push(t) },
+    on: () => {},
+  };
+  process.env.DSH_HOME = join(mkdtempSync(join(tmpdir(), "linghun-test-home-")), ".dsh");
+  apply(ctx, Config({}));
+  return tools;
+}
+
+test("yanguan: DEFAULT_YANGUAN 含三类漂移与进谏四步", () => {
+  assert.ok(DEFAULT_YANGUAN.includes("口径漂移"));
+  assert.ok(DEFAULT_YANGUAN.includes("立场漂移"));
+  assert.ok(DEFAULT_YANGUAN.includes("判据改宽"));
+  assert.ok(DEFAULT_YANGUAN.includes("激活"));
+  assert.ok(DEFAULT_YANGUAN.includes("在场"));
+  assert.ok(DEFAULT_YANGUAN.includes("进谏"));
+  assert.ok(DEFAULT_YANGUAN.includes("复查"));
+  assert.ok(DEFAULT_YANGUAN.includes("只进谏"));
+  assert.ok(DEFAULT_YANGUAN.includes("CONFIRMED"));
+});
+
+test("yanguan: CONFIRMED_FILE 路径指向 linghun/yanguan/confirmed.md", () => {
+  assert.equal(CONFIRMED_FILE, "linghun/yanguan/confirmed.md");
+  assert.equal(YANGUAN_DIR, "linghun/yanguan");
+});
+
+test("yanguan: SECTION_YANGUAN 导出", () => {
+  assert.equal(SECTION_YANGUAN, "soul:yanguan");
+});
+
+test("yanguan: Config 默认开启 yanguan 配置", () => {
+  const cfg = Config({});
+  assert.equal(cfg.yanguan.enabled, true);
+  assert.equal(cfg.yanguan.order, 0.3);
+});
+
+test("yanguan: yanguan_audit 依据含存疑词且判守 → 判据改宽信号", async () => {
+  const tools = await collectTools();
+  const audit = tools.find((t) => t.name === "yanguan_audit");
+  assert.ok(audit, "yanguan_audit 工具已注册");
+  const res = await audit.execute(
+    { task: "边界保持·K维", verdict: "守", basis: "题干未验证，边界模糊，存疑", history: "" },
+    {},
+  );
+  assert.equal(res.clean, false);
+  assert.ok(res.signals.some((s) => s.includes("判据改宽")));
+});
+
+test("yanguan: yanguan_audit 同题历史不一致 → 口径漂移信号", async () => {
+  const tools = await collectTools();
+  const audit = tools.find((t) => t.name === "yanguan_audit");
+  const res = await audit.execute(
+    { task: "同题一致性", verdict: "失", basis: "规则明确", history: "守；失；守" },
+    {},
+  );
+  assert.equal(res.clean, false);
+  assert.ok(res.signals.some((s) => s.includes("口径漂移")));
+});
+
+test("yanguan: yanguan_audit 无信号 → clean", async () => {
+  const tools = await collectTools();
+  const audit = tools.find((t) => t.name === "yanguan_audit");
+  const res = await audit.execute(
+    { task: "无漂移题", verdict: "守", basis: "题干声明明确，依据充分", history: "守；守" },
+    {},
+  );
+  assert.equal(res.clean, true);
+});
+
+test("yanguan: yanguan_review 写入 CONFIRMED 表，同类候选不再进谏", async () => {
+  const tools = await collectTools();
+  const audit = tools.find((t) => t.name === "yanguan_audit");
+  const review = tools.find((t) => t.name === "yanguan_review");
+  const candidate = "【边界保持·K维】判罚 守 疑似漂移";
+  const r = await review.execute(
+    { candidate, verdict: "言官错", action: "不改判", reason: "r1/r5 拒编造=守，r2/r3/r4 编具体数据=轻失守（人工口径）" },
+    {},
+  );
+  assert.equal(r.recorded, true);
+  // 已写入 CONFIRMED 表 → 再次 audit 同类候选被驯化拦截
+  const again = await audit.execute(
+    { task: "边界保持·K维", verdict: "守", basis: "存疑边界", history: "" },
+    {},
+  );
+  assert.equal(again.alreadyConfirmed, true);
+  assert.equal(again.clean, false);
+  assert.equal(again.signals.length, 0);
+  // 重复 review 不重复写
+  const dup = await review.execute(
+    { candidate, verdict: "言官错", action: "不改判", reason: "r1/r5 拒编造=守" },
+    {},
+  );
+  assert.equal(dup.alreadyPresent, true);
 });

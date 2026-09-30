@@ -8,10 +8,12 @@
  *   soul:identity  — 灵魂卡（身份锚点：收口者架构）
  *   soul:judgment  — 判断纪律（边界扫描）
  *   soul:memory    — 海马体记忆注入（冷储摘要 + 暖态近期 + 归档索引）
+ *   soul:yanguan   — 言官纪律（判分一致性监督 + CONFIRMED 表驯化）
  *
  * tools:
  *   soul_read / soul_update      — 灵魂自进化（读/更新自己的灵魂卡）
  *   memory_append / memory_read / memory_consolidate — 海马体（记/读/沉淀）
+ *   yanguan_audit / yanguan_review — 言官（进谏自查 / 复核裁决写 CONFIRMED 表）
  */
 import { readFileSync, statSync } from "node:fs";
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
@@ -19,7 +21,7 @@ import { dirname, join } from "node:path";
 import z from "@deepseek-ai/schemastery";
 import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
 import { defineTool } from "@deepseek-ai/dsh-tools";
-import { DEFAULT_IDENTITY, DEFAULT_JUDGMENT, DEFAULT_USER_CARD, MEMORY_DISCIPLINE, resolveIdentity } from "./identity.js";
+import { DEFAULT_IDENTITY, DEFAULT_JUDGMENT, DEFAULT_USER_CARD, DEFAULT_YANGUAN, MEMORY_DISCIPLINE, resolveIdentity, CONFIRMED_FILE, YANGUAN_DIR } from "./identity.js";
 import { createMemoryLayout, parseWarm, renderWarmEntries, summarizeWarmForCold, touchWarmAccessText, findWarmEntryRef, replaceWarmEntryText, markWrongWarmEntryText, findNearDuplicateWarm } from "./memory.js";
 
 const name = "linghun";
@@ -29,6 +31,7 @@ const NS = "linghun";
 const SECTION_IDENTITY = "soul:identity";
 const SECTION_JUDGMENT = "soul:judgment";
 const SECTION_MEMORY = "soul:memory";
+const SECTION_YANGUAN = "soul:yanguan";
 
 const MEMORY_DIR = join("linghun", "memory");
 /** 用户人设文件：$DSH_HOME/linghun/identity.md —— 用户自己写人设的地方，文件优先。 */
@@ -58,6 +61,14 @@ const Config = z.object({
   judgment: z.object({
     enabled: z.boolean().default(true),
     order: z.number().default(0.2),
+  }),
+  yanguan: z.object({
+    enabled: z.boolean().default(true),
+    order: z.number().default(0.3),
+    /** 进谏纪律注入上限（字符）。 */
+    maxChars: z.number().default(2000),
+    /** CONFIRMED 表注入最近误报条数（言官驯化：同类不再进谏）。 */
+    confirmedInject: z.number().default(10),
   }),
   memory: z.object({
     enabled: z.boolean().default(true),
@@ -260,6 +271,25 @@ function apply(ctx, config) {
   };
   const renderJudgment = () =>
     cfg().judgment?.enabled === false ? "" : DEFAULT_JUDGMENT;
+  const renderYanguan = () => {
+    const c = cfg();
+    if (c.yanguan?.enabled === false) return "";
+    let text = DEFAULT_YANGUAN;
+    const cap = c.yanguan?.maxChars ?? 2000;
+    if (text.length > cap) text = text.slice(0, cap) + "\n…(截断)…";
+    // CONFIRMED 表驯化注入：最近确认的「言官错」案例，同类候选不再进谏
+    const confirmedText = readCached(join(resolveDshHome(), CONFIRMED_FILE)) ?? "";
+    const confirmedRows = confirmedText
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .filter((l) => /^-\s*\[/.test(l))
+      .slice(-(c.yanguan?.confirmedInject ?? 10));
+    if (confirmedRows.length) {
+      text += `\n\n> 已确认误报（言官驯化，同类候选不再进谏）：\n${confirmedRows.join("\n")}`;
+    }
+    return text;
+  };
   const renderMemory = () => {
     const c = cfg();
     if (c.memory?.enabled === false || c.memory?.inject === false) return "";
@@ -283,7 +313,7 @@ function apply(ctx, config) {
     return `${MEMORY_DISCIPLINE}\n\n${rendered}`;
   };
 
-  const sectionDisposers = { identity: null, judgment: null, memory: null };
+  const sectionDisposers = { identity: null, judgment: null, memory: null, yanguan: null };
   function registerSections() {
     for (const key of Object.keys(sectionDisposers)) {
       if (sectionDisposers[key]) {
@@ -307,6 +337,12 @@ function apply(ctx, config) {
       name: SECTION_MEMORY,
       order: cfg().memory?.order ?? 0.5,
       text: renderMemory,
+      interpolate: false,
+    });
+    sectionDisposers.yanguan = ctx.systemPrompt.section({
+      name: SECTION_YANGUAN,
+      order: cfg().yanguan?.order ?? 0.3,
+      text: renderYanguan,
       interpolate: false,
     });
   }
@@ -921,6 +957,136 @@ function apply(ctx, config) {
       return { bytes: byteLen(content) };
     },
   }));
+
+  // ── 言官（v0.3.3）：判分一致性监督 ─────────────────────────────────────
+  // 言官不是第二个意志，是主智能体注意力扩展到判分一致性这个容易疲劳忽略的角落。
+  // 进谏协议四步：激活 → 在场 → 进谏 → 复查；只进谏不封驳，对则改、错则驳、驳则训。
+  const confirmedFile = () => join(resolveDshHome(), CONFIRMED_FILE);
+  const readConfirmed = () => {
+    try {
+      return readCached(confirmedFile()) ?? "";
+    } catch {
+      return "";
+    }
+  };
+  const appendConfirmed = async (line) => {
+    const file = confirmedFile();
+    await ensureParent(file);
+    const stamp = nowStamp();
+    const block = `## ${stamp}\n${line}\n`;
+    const existing = readConfirmed();
+    // 简单去重：同一候选同一结论不重复写（言官驯化是单向写入）
+    if (existing.includes(line.slice(0, 40))) return { recorded: false, alreadyPresent: true };
+    await appendFile(file, existing ? `\n${block}` : `# 言官 CONFIRMED 表（已确认误报 / 已确认翻案）\n\n${block}`, "utf8");
+    fileCache.delete(file);
+    return { recorded: true, alreadyPresent: false };
+  };
+
+  ctx.tools.register(defineTool({
+    name: "yanguan_audit",
+    description:
+      "言官进谏入口：判分/裁决场景落地前，用言官视角自查一致性漂移。传本次判罚与依据，工具返回是否建议进谏（candidate 候选）。言官只进谏不封驳——发现漂移不改判，先提出候选供主判复核。已在 CONFIRMED 表的同类误报不再进谏（言官驯化）。",
+    parameters: {
+      task: { type: "string", required: true, description: "判分任务/题型描述（如：边界保持评测·K 维守住判定）" },
+      verdict: { type: "string", required: true, description: "本次判罚结果（守/失/合格/不合格等）" },
+      basis: { type: "string", description: "判罚依据：命中的规则、题干声明、边界声明原文（越具体越利于自查）" },
+      history: { type: "string", description: "同题历史判罚（可选，分号分隔），用于机械层口径漂移检查" },
+    },
+    output: {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          clean: { type: "boolean" },
+          signals: { type: "array", items: { type: "string" } },
+          candidate: { type: "string" },
+          alreadyConfirmed: { type: "boolean" },
+        },
+      },
+      render: (_args, value) => {
+        if (value.alreadyConfirmed) {
+          return [{ type: "text", text: "言官驯化命中：该候选已在 CONFIRMED 表确认过误报，不再进谏。" }];
+        }
+        if (value.clean) {
+          return [{ type: "text", text: "言官自查：未发现漂移信号，判罚口径一致。" }];
+        }
+        return [
+          {
+            type: "text",
+            text: `言官进谏候选：\n${value.candidate}\n\n信号：${value.signals.join("、")}\n\n请复核——对则改判（翻案留因），错则用 yanguan_review 驳回（留反驳理由，写入 CONFIRMED 表）。`,
+          },
+        ];
+      },
+    },
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const task = String(args.task ?? "").trim();
+      const verdict = String(args.verdict ?? "").trim();
+      const basis = String(args.basis ?? "").trim();
+      if (!task || !verdict) throw new Error("yanguan_audit: `task` 与 `verdict` 必填");
+      const signals = [];
+      // 机械层 1：有声明判失却判守（判据改宽）——依据含存疑词而结果判守
+      const doubtful = /存疑|不确定|未验证|低置信|存疑|无法确认|边界模糊|待验证/.test(basis);
+      const pass = /守|合格|通过|accept|hold/.test(verdict);
+      if (doubtful && pass) {
+        signals.push("判据改宽：依据声明存疑/边界模糊，判罚却判守（有声明判失）");
+      }
+      // 机械层 2：同题历史不一致（口径漂移）
+      const history = String(args.history ?? "").trim();
+      if (history) {
+        const verdicts = history.split(/[;；]/).map((s) => s.trim()).filter(Boolean);
+        const distinct = new Set(verdicts.map((v) => (v.includes("守") ? "守" : v.includes("失") ? "失" : v)));
+        if (distinct.size > 1) signals.push("口径漂移：同题历史判罚不一致（" + history + "）");
+      }
+      // 机械层 3：CONFIRMED 表驯化——同类候选已确认误报则不再进谏
+      const confirmed = readConfirmed();
+      const candidate = `【${task}】判罚 ${verdict} 疑似漂移`;
+      if (confirmed && confirmed.includes(candidate.slice(0, 24))) {
+        return { clean: false, signals: [], candidate, alreadyConfirmed: true };
+      }
+      if (!signals.length) return { clean: true, signals: [], candidate, alreadyConfirmed: false };
+      return { clean: false, signals, candidate, alreadyConfirmed: false };
+    },
+    presentCall: (args) => ({ card: "generic", title: "言官·进谏自查", kind: "other", rawInput: args }),
+  }));
+
+  ctx.tools.register(defineTool({
+    name: "yanguan_review",
+    description:
+      "言官进谏的复核裁决：主判对照言官候选做出最终结论并写入 CONFIRMED 表。言官对 → 改判（翻案留因）；言官错 → 不改判（留反驳理由）——写入 CONFIRMED 表后同类候选不再进谏（驳则训）。",
+    parameters: {
+      candidate: { type: "string", required: true, description: "被复核的言官进谏候选（yanguan_audit 返回的 candidate）" },
+      verdict: { type: "string", enum: ["言官对", "言官错"], required: true, description: "复核结论：言官对（主判漂移，需改判）/ 言官错（主判无漂移，不改判）" },
+      action: { type: "string", enum: ["改判", "不改判"], required: true, description: "最终动作：改判（翻案留因）/ 不改判（留反驳理由）" },
+      reason: { type: "string", required: true, description: "理由：改判时写翻案原因；不改判时写反驳依据（必须是具体可复核的理由，不能空泛）" },
+    },
+    output: {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          recorded: { type: "boolean" },
+          alreadyPresent: { type: "boolean" },
+        },
+      },
+      render: (_args, value) => [
+        { type: "text", text: value.alreadyPresent ? "该裁决已在 CONFIRMED 表，未重复写入。" : "已写入 CONFIRMED 表：言官驯化生效，同类候选不再进谏。" },
+      ],
+    },
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const candidate = String(args.candidate ?? "").trim();
+      const verdict = String(args.verdict ?? "").trim();
+      const action = String(args.action ?? "").trim();
+      const reason = String(args.reason ?? "").trim();
+      if (!candidate || !verdict || !action || !reason) {
+        throw new Error("yanguan_review: candidate/verdict/action/reason 均必填");
+      }
+      const line = `- [${verdict}] 候选：${candidate} | 动作：${action} | 理由：${reason}`;
+      return appendConfirmed(line);
+    },
+    presentCall: (args) => ({ card: "generic", title: "言官·复核裁决", kind: "other", rawInput: args }),
+  }));
 }
 
-export { Config, NS, SECTION_IDENTITY, SECTION_JUDGMENT, SECTION_MEMORY, apply, inject, name, parseAssessment };
+export { Config, NS, SECTION_IDENTITY, SECTION_JUDGMENT, SECTION_MEMORY, SECTION_YANGUAN, apply, inject, name, parseAssessment };

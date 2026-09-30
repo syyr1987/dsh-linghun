@@ -23,6 +23,10 @@ and experience keeps flowing back into the next round. Endless planning is cut o
 - **A2A memory team (linghun-assembler)**: share the cognitive-cycle team's ledger — judge
   records, editor deliveries, archivist timelines — into the main brain via `memory_read`.
 - **Self-evolution**: the agent reads and updates its own soul card via `soul_read` / `soul_update`.
+- **Censor (言官, judgment-consistency supervision)**: judgment/ruling scenes activate a
+  supervision disposition watching three drift classes (criteria / stance / criterion widening).
+  It admonishes only and never overrules; rejected admonitions land in a CONFIRMED table so
+  similar candidates are not raised again — **the Censor gets sharper over time**.
 
 ## Install
 
@@ -66,6 +70,7 @@ Prompt sections injected:
 - `soul:identity` — soul card (identity anchors: the Closer architecture)
 - `soul:judgment` — boundary scan discipline (six boundary classes)
 - `soul:memory` — cold summary + warm recent + archive index
+- `soul:yanguan` — Censor discipline (judgment-consistency supervision: 3 drift classes + 4-step admonition + CONFIRMED taming)
 
 Tools exposed:
 
@@ -76,9 +81,12 @@ Tools exposed:
 | `memory_consolidate` | Consolidate: warm → `episodic/<date>.md`, merge cold summary |
 | `soul_read` | Read your own soul card (who I am, my boundaries, my discipline) |
 | `soul_update` | Update your own soul card (fold stable traits into identity) |
+| `yanguan_audit` | Censor admonition: self-check a verdict against 3 drift signals (admonish only, never overrule) |
+| `yanguan_review` | Censor review ruling: overrule on right, reject with reason into the CONFIRMED table on wrong |
 
 Memory lives in plain Markdown under `$DSH_HOME/linghun/memory/` — readable, searchable, git-friendly.
 The soul card is at `$DSH_HOME/linghun/identity.md` — also plain Markdown. Your persona is yours; edit it however you like.
+The Censor CONFIRMED table lives at `$DSH_HOME/linghun/yanguan/confirmed.md` — rejected admonitions are recorded there; similar candidates are not raised again.
 
 ## Engineering guardrails (v0.2)
 
@@ -93,7 +101,8 @@ Both can be tuned under the `linghun.memory.assessment` / `linghun.memory.autoCo
 
 - **v0.1.0** (done): identity + judgment + hippocampus
 - **v0.2.0** (done): engineering memory guardrails — end-of-turn assessment + threshold auto-consolidation
-- **v0.3.0** (current): miss-verification discipline — "candidate not hit" in material ≠ memory has none; verify cold storage for factual queries; converge by question type for identity/background
+- **v0.3.0** (done): miss-verification discipline — "candidate not hit" in material ≠ memory has none; verify cold storage for factual queries; converge by question type for identity/background
+- **v0.3.3** (current): Censor (verifier verification discipline) — same line as v0.3.0: model verification discipline → verifier verification discipline. Judgment scenes activate a supervision disposition watching three drift classes (criteria / stance / criterion widening); admonish only, never overrule; CONFIRMED table tames the Censor over time
 - **v0.4.0**: LLM-distilled cold storage (checkpoint → episodic → knowledge with real summarization)
 - **v0.5.0**: dual-instance mutual verification (criteria source bound to the verifier)
 
