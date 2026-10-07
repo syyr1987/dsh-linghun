@@ -34,7 +34,19 @@
 - **v0.1.0**（本阶段）：三件套跑通，npm 发布
 - **v0.2.0**：判分纪律——judge 工具（ACCEPT/REJECT/BLINDSPOT/DEFER 四态）+ 判据指纹断言（防判据被悄悄改宽）
 - **v0.3.0**：海马体 LLM 精炼（沉淀协议自动化：checkpoint → episodic → 领域本体）
-- **v0.4.0**：双实例互验（判据来源绑定验证者，打破自指悖论的工程形态）
+- **v0.3.x**：认知循环团队（assembler v0.2：judge/archivist/advocate/editor/scribe）+ BM25 题型分流 + summarization 双轨 + 史官缓存复用 + 判官履历 + 编辑 bundles + 缺口闭环 + workspaceDirs 领域库
+- **v0.4.0**（BEAM 验证机制回灌，linghun 0.4.0 + assembler 0.4.0 套装）：
+  - 记忆本体投影：`memory_project` 工具（warm 按主题桶 LLM 聚合 → `$DSH_HOME/linghun/memory/ontology.md`）
+  - 本体主题索引优先：assembler 检索侧 ontology.md + TAG_ALIAS 主题命中，BM25 兜底
+  - 知识本体注入：K_ALIAS 技术实体命中 → 注入知识节点，救对话外知识
+  - rubric 维度强制检索 + dim_raw 原文直补（逐维度独立 BM25，原文绕过组装压缩）
+  - 完整题型纪律：summarization（因果链+阶段+学到的）、event_ordering、preference_following（版本绑定）、knowledge_update、contradiction_resolution、temporal_reasoning
+- **v0.4.1**（规则本体，三本体三分法定稿，linghun 0.4.1 + assembler 0.4.1 套装）：
+  - 三分法定稿（对照岚客对山越野人的回复）：技术知识→知识本体、项目场景→记忆本体、总结经验→规则本体
+  - 规则本体落盘：`memory_rules` 工具（rule/topic → `$DSH_HOME/linghun/memory/rules.md`，同主题聚合、不同主题独立节点）
+  - 规则本体注入：assembler 检索侧 rules.md + R_ALIAS 规则别名命中 → 【规则本体·长期规则（总结经验）】块，救 [04] 矛盾不硬裁、[08] 查证纪律
+  - 白板链路测试扩展：三本体齐备验证（记忆/知识/规则 + 领域载体）
+- **v0.5.0**：双实例互验（判据来源绑定验证者，打破自指悖论的工程形态）
 
 ## 技术架构
 
@@ -50,7 +62,8 @@
 linghun-plugin/
 ├── package.json        # dsh 字段声明（bundle.patch / compatibility）
 ├── cordis.patch.yml    # Cordis 挂载声明
-├── index.js            # 插件主入口（sections + tools + settings + 人设文件）
+├── index.js            # 插件主入口（sections + tools + settings + 人设文件 + memory_project）
+├── ontology.js         # 三本体投影（parseOntology/hitThemeByAlias/writeOntologySafe/appendRulesSafe）
 ├── identity.js         # 默认灵魂卡内容 + resolveIdentity 优先级解析（文件>配置>默认）
 ├── memory.js           # 海马体记忆布局（暖态/冷储/索引）
 ├── LICENSE             # AGPL-3.0
