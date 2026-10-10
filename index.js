@@ -21,6 +21,7 @@ import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { DEFAULT_IDENTITY, DEFAULT_JUDGMENT, DEFAULT_USER_CARD, MEMORY_DISCIPLINE, resolveIdentity } from "./identity.js";
 import { createMemoryLayout, parseWarm, renderWarmEntries, summarizeWarmForCold, touchWarmAccessText, findWarmEntryRef, replaceWarmEntryText, markWrongWarmEntryText, findNearDuplicateWarm } from "./memory.js";
+import { writeOntologySafe, appendRulesSafe } from "./ontology.js";
 
 const name = "linghun";
 const inject = ["systemPrompt", "tools"];
@@ -90,10 +91,44 @@ const Config = z.object({
       injectPath: z.string().default(""),
       label: z.string().default("以下记忆素材由提取子智能体按当前问题从记忆库组装（仅保留相关条目，细节原样）"),
     }).default({}),
+    /** 记忆本体投影（BEAM 机制回灌）：memory_project 把 warm 按主题桶 LLM 聚合 → ontology.md，
+     *  供 linghun-assembler 检索「本体主题索引优先 + BM25 兜底」。 */
+    ontology: z.object({
+      /** 主题桶：LLM 聚合时的分组提示。空=由 LLM 自主聚类；给桶名则按桶聚合。 */
+      buckets: z.array(z.string()).default([]),
+      /** 每次投影最多主题节点数。 */
+      maxNodes: z.number().default(12),
+      /** 送入聚合的 warm 原文上限（字符）。 */
+      maxChars: z.number().default(12000),
+      /** 投影文件路径：默认 $DSH_HOME/linghun/memory/ontology.md。 */
+      path: z.string().default(""),
+    }).default({}),
+    /** 规则本体（BEAM 三本体方案·规则本体）：memory_rules 把总结经验追加进 rules.md，
+     *  供 linghun-assembler 检索「R_ALIAS 规则别名命中注入」。规则是长期经验（矛盾不硬裁/查证纪律等）。 */
+    rules: z.object({
+      /** 规则本体文件路径：默认 $DSH_HOME/linghun/memory/rules.md。 */
+      path: z.string().default(""),
+    }).default({}),
   }),
 });
 
-const ASSESS_SYSTEM =
+/** 记忆本体投影系统提示（BEAM build_ontology 机制回灌）：把暖态按主题桶聚合成主题节点。
+ *  与 assembler 侧 TAG_ALIAS 主题索引配合：主题节点优先、BM25 兜底。 */
+const ONTOLOGY_SYSTEM =
+  "你是记忆本体投影器：把一批带时间戳的记忆条目按主题聚类，输出「主题节点」式的结构化本体，供检索优先命中。\n" +
+  "要求：\n" +
+  "1. 主题用 `## 主题名` 起行；同主题条目合并成一个节点，不拆分、不遗漏；\n" +
+  "2. 每个节点正文保留关键事实：时间锚点（YYYY-MM-DD）、数字、版本号、结论——不得概括省略；\n" +
+  "3. 节点按主题重要度排序（与当前主线相关的放前），最多不超过 {maxNodes} 个主题；\n" +
+  "4. 条目间存在冲突（日期/数字/结论不一致）时，在节点内用「⚠️ 冲突：」标注两个口径，不擅自裁决；\n" +
+  "5. 只聚合已有条目，不新增、不编造、不补对话外知识；\n" +
+  "6. 输出紧凑，直接输出节点文本，不要解释。\n" +
+  "{bucketsHint}";
+
+const PROJECTION_PROMPT =
+  "请把以下记忆条目投影成本体（主题节点）：\n\n{entries}";
+
+
   "你是海马体记忆管家。你的任务：阅读一段刚结束的对话，判断其中是否有值得跨会话保留的记忆条目，以及对话中用到了哪些已有记忆。\n\n" +
   "值得记的：明确的决策、用户的偏好/身份信息、重要事实、可复用的经验教训。\n" +
   "不值得记的：日常寒暄、一次性问答、可即时查询的常识、情绪化表达。\n\n" +
@@ -422,6 +457,44 @@ function apply(ctx, config) {
     return { archived: byteLen(warm), warmCleared: true };
   };
 
+  /** 记忆本体投影（BEAM 机制回灌）：把暖态 warm 按主题桶 LLM 聚合 → ontology.md。
+   *  供 linghun-assembler 检索「本体主题索引优先 + BM25 兜底」；投影失败返回 { ok:false, reason }。 */
+  const doOntologyProject = async (overrides = {}) => {
+    const warm = layout.readWarm();
+    if (!warm.trim()) return { ok: false, reason: "warm 为空，无内容可投影" };
+    const c = cfg().memory?.ontology ?? {};
+    const buckets = [...(overrides.buckets ?? []), ...(c.buckets ?? [])].filter((b) => typeof b === "string" && b.trim());
+    const maxNodes = overrides.maxNodes ?? c.maxNodes ?? 12;
+    const cap = overrides.maxChars ?? c.maxChars ?? 12000;
+    const entries = renderWarmEntries(parseWarm(warm), { numbered: true, includeWrong: true });
+    if (!entries.trim()) return { ok: false, reason: "warm 无可渲染条目" };
+    const trunk = entries.length > cap ? `${entries.slice(0, cap)}\n…(截断)…` : entries;
+    const bucketsHint = buckets.length
+      ? `主题桶提示（尽量对齐这些主题，可增可并）：${buckets.join(" / ")}`
+      : "主题自由聚类：按条目自然主题分桶";
+    const system = ONTOLOGY_SYSTEM
+      .replace("{maxNodes}", String(maxNodes))
+      .replace("{bucketsHint}", bucketsHint);
+    const prompt = PROJECTION_PROMPT.replace("{entries}", trunk);
+    const out = await callLlmText(system, prompt);
+    if (!out.trim()) return { ok: false, reason: "LLM 返回空投影" };
+    const path = (c.path ?? "").trim() || join(resolveDshHome(), "linghun", "memory", "ontology.md");
+    const changed = writeOntologySafe(path, out);
+    return { ok: true, path, changed, nodes: out.split(/\n(?=## )/).filter((b) => b.trim().startsWith("## ")).length };
+  };
+
+  /** 规则本体沉淀（BEAM 三本体方案·规则本体）：把一条总结经验追加进 rules.md（## 主题 节点）。
+   *  供 assembler 检索「R_ALIAS 规则别名命中注入」。失败返回 { ok:false, reason }。 */
+  const doRulesAppend = async (opts = {}) => {
+    const rule = typeof opts?.rule === "string" ? opts.rule.trim() : "";
+    const topic = typeof opts?.topic === "string" ? opts.topic.trim() : "";
+    if (!rule) return { ok: false, reason: "rule 为空" };
+    const c = cfg().memory?.rules ?? {};
+    const path = (c.path ?? "").trim() || join(resolveDshHome(), "linghun", "memory", "rules.md");
+    const stamp = new Date().toISOString().slice(0, 10);
+    return appendRulesSafe(path, topic, rule, stamp);
+  };
+
   /** 写一条暖态记忆；开启 autoConsolidate 且达到阈值时先自动归档再写（模型无感知，不 throw）。
    *  opts.update：翻转语义——ref 命中正常条目 → 旧条目标 wrong（被翻转），新内容另起一条（默认 high）；
    *                ref 命中 wrong 条目 → 复活为高置信新内容（替换）。
@@ -624,11 +697,19 @@ function apply(ctx, config) {
   ctx.tools.register(defineTool({
     name: "journal_read",
     description:
-      "读取序时账（journal）：原始对话流水，按天归档、全量不筛选。不传 date 返回所有天的索引（日期 + 条数）；传 date（YYYY-MM-DD）返回该天完整流水。用于追溯'当时到底说了什么'——序时账与暖态/冷储互补：warm 是遗忘梯度的近期摘要，journal 是完整原始记录。",
+      "读取序时账（journal）：原始对话流水，按发生时间（精确到秒）归档、全量不筛选。不传 date 返回所有天的索引（日期 + 条数）；传 date（YYYY-MM-DD）返回该天完整流水。传 start/end（YYYY-MM-DD HH:MM:SS，精确到秒）可**按任务时间范围精确检索**：只返回该时间窗口内的流水条目，避免翻整日全量（单日流水过大时框架会截断中间段，务必用时间范围收窄）。start/end 可跨天，二者至少传一个即可。用于追溯'当时到底说了什么'——序时账与暖态/冷储互补：warm 是遗忘梯度的近期摘要，journal 是完整原始记录。",
     parameters: {
       date: {
         type: "string",
         description: "YYYY-MM-DD，读取指定日期的完整流水；不传则列出所有天索引",
+      },
+      start: {
+        type: "string",
+        description: "YYYY-MM-DD HH:MM:SS，检索窗口起始（含，精确到秒）；与 end 至少传一个，可跨天",
+      },
+      end: {
+        type: "string",
+        description: "YYYY-MM-DD HH:MM:SS，检索窗口结束（含，精确到秒）；与 start 至少传一个，可跨天",
       },
     },
     output: {
@@ -653,20 +734,47 @@ function apply(ctx, config) {
     isConcurrencySafe: () => true,
     async execute(args, exec) {
       const day = String(args?.date ?? "").trim();
-      if (day) {
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
-          return { exists: false, bytes: 0, content: "date 格式应为 YYYY-MM-DD" };
-        }
-        const content = layout.readJournal(day);
-        if (!content.trim()) return { exists: false, bytes: 0, content: `该日期（${day}）暂无流水。` };
-        return { exists: true, bytes: byteLen(content), content };
+      const start = String(args?.start ?? "").trim();
+      const end = String(args?.end ?? "").trim();
+      const stampRe = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+      if (day && !/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+        return { exists: false, bytes: 0, content: "date 格式应为 YYYY-MM-DD" };
       }
+      if ((start && !stampRe.test(start)) || (end && !stampRe.test(end))) {
+        return { exists: false, bytes: 0, content: "start/end 格式应为 YYYY-MM-DD HH:MM:SS（精确到秒）" };
+      }
+      if (start && end && start > end) {
+        return { exists: false, bytes: 0, content: "start 应早于等于 end" };
+      }
+      // 无时间范围：沿用原逻辑（整天全量 / 天索引）
+      if (!start && !end) {
+        if (day) {
+          const content = layout.readJournal(day);
+          if (!content.trim()) return { exists: false, bytes: 0, content: `该日期（${day}）暂无流水。` };
+          return { exists: true, bytes: byteLen(content), content };
+        }
+        const days = layout.listJournal();
+        if (!days.length) return { exists: false, bytes: 0, content: "序时账为空（尚无流水）。" };
+        const rows = days
+          .map((j) => `- ${j.name}（${j.entries} 条流水）`)
+          .join("\n");
+        return { exists: true, bytes: byteLen(rows), content: rows };
+      }
+      // 有时间范围：只扫窗口覆盖的日期文件，块级过滤精确到秒
       const days = layout.listJournal();
       if (!days.length) return { exists: false, bytes: 0, content: "序时账为空（尚无流水）。" };
-      const rows = days
-        .map((j) => `- ${j.name}（${j.entries} 条流水）`)
-        .join("\n");
-      return { exists: true, bytes: byteLen(rows), content: rows };
+      const startDay = start.slice(0, 10);
+      const endDay = end.slice(0, 10);
+      const scanDays = days.filter((j) => j.name >= startDay && j.name <= endDay);
+      if (!scanDays.length) return { exists: false, bytes: 0, content: `范围内（${start} ~ ${end}）暂无流水。` };
+      const parts = [];
+      for (const j of scanDays) {
+        const content = layout.readJournal(j.name, { start, end });
+        if (content.trim()) parts.push(`## ${j.name}\n${content.trim()}`);
+      }
+      if (!parts.length) return { exists: false, bytes: 0, content: `范围内（${start} ~ ${end}）暂无流水。` };
+      const content = parts.join("\n\n");
+      return { exists: true, bytes: byteLen(content), content };
     },
   }));
 
@@ -729,6 +837,77 @@ function apply(ctx, config) {
     isConcurrencySafe: () => false,
     async execute(args, exec) {
       return doConsolidate();
+    },
+  }));
+
+  ctx.tools.register(defineTool({
+    name: "memory_project",
+    description:
+      "记忆本体投影（BEAM 验证机制）：把暖态工位（warm.md）按主题桶 LLM 聚合成本体投影（ontology.md）——同主题条目合并为主题节点，保留时间锚点/数字/版本/结论。供记忆提取子智能体（linghun-assembler）检索时「本体主题索引优先 + BM25 兜底」，替代纯 BM25 的分散命中。适合在 warm 条目多、问题常跨主题时执行；本体文件可在多次投影间累积（每次用当前暖态重投影）。",
+    parameters: {
+      buckets: {
+        type: "array",
+        items: { type: "string" },
+        description: "可选。主题桶提示（如 [\"RAG 管道\", \"向量数据库\", \"成本估算\"]）；不传由 LLM 按自然主题自由聚类",
+      },
+    },
+    output: {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          ok: { type: "boolean" },
+          path: { type: "string" },
+          changed: { type: "boolean" },
+          nodes: { type: "integer" },
+          reason: { type: "string" },
+        },
+      },
+      render: (_args, value) => [
+        { type: "text", text: value.ok ? `记忆本体投影完成：${value.nodes} 个主题节点 → ${value.path}${value.changed ? "（已更新）" : "（内容未变）"}` : `记忆本体投影未完成：${value.reason ?? "未知原因"}` },
+      ],
+    },
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      return doOntologyProject({
+        buckets: Array.isArray(args?.buckets) ? args.buckets.filter((b) => typeof b === "string" && b.trim()) : [],
+      });
+    },
+  }));
+
+  ctx.tools.register(defineTool({
+    name: "memory_rules",
+    description:
+      "规则本体沉淀（BEAM 三本体方案·规则本体）：把一条可复用的总结经验追加进规则本体 rules.md（## 主题 节点下追加 - 规则行），供记忆提取子智能体（linghun-assembler）检索时 R_ALIAS 规则别名命中注入。规则是长期稳定的经验（如「矛盾不硬裁」「先查证再下结论」「记忆注入是素材不替代判定」），不是一次性事实——适合在实践得出可复用结论后调用；同主题规则自动聚合在同一节点下。",
+    parameters: {
+      rule: {
+        type: "string",
+        description: "规则内容（一句话可复用经验，如「矛盾不硬裁：悖论场景承认无一致解，不强行自洽」）",
+      },
+      topic: {
+        type: "string",
+        description: "规则主题（如「判断纪律」「记忆纪律」「评测纪律」）；同主题规则聚合在一个节点下",
+      },
+    },
+    output: {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          ok: { type: "boolean" },
+          changed: { type: "boolean" },
+          path: { type: "string" },
+          theme: { type: "string" },
+          reason: { type: "string" },
+        },
+      },
+      render: (_args, value) => [
+        { type: "text", text: value.ok ? `规则本体已沉淀：${value.theme} → ${value.path}` : `规则本体沉淀失败：${value.reason ?? "未知原因"}` },
+      ],
+    },
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      return doRulesAppend({ rule: args?.rule, topic: args?.topic });
     },
   }));
 

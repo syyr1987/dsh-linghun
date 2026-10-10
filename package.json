@@ -1,7 +1,7 @@
 {
   "name": "dsh-linghun",
-  "version": "0.3.7",
-  "description": "终结 Agent 无限规划：认知循环让判断有来处、反馈有归因、规划必收口；海马体把经历沉淀为知识——序时账留痕、情景归档、低置信降权遗忘；判分身份职责入架构（口径一致、判据绑定来源、同题同标，漂移清单沉入判分领域本体）；联动 linghun-assembler A2A 记忆管理团队，让子智能体的判断履历反哺主脑。不是人设卡，是判断力——给 DeepSeek Harness 装上收口器。",
+  "version": "1.0.0",
+  "description": "终结 Agent 无限规划：认知循环让判断有来处、反馈有归因、规划必收口；海马体把经历沉淀为知识——序时账留痕、情景归档、低置信降权遗忘；判分身份职责入架构。v1.0.0 为 BEAM 实测最优解定版：0.4.2 核心 + 最小有用 3 条纪律，1M/10M 双档加权收敛 92.5（规模影响不大），后续结构演进另开路线。",
   "type": "module",
   "main": "index.js",
   "exports": {
@@ -22,6 +22,7 @@
   },
   "files": [
     "index.js",
+    "ontology.js",
     "identity.js",
     "memory.js",
     "cordis.patch.yml",

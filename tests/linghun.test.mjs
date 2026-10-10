@@ -16,14 +16,18 @@ test("identity: 默认灵魂卡包含收口者身份锚点", () => {
   assert.ok(DEFAULT_IDENTITY.length > 200);
 });
 
-test("identity: 判断纪律包含六类边界", () => {
-  assert.ok(DEFAULT_JUDGMENT.includes("模糊概念"));
-  assert.ok(DEFAULT_JUDGMENT.includes("悖论"));
-  assert.ok(DEFAULT_JUDGMENT.includes("身份边界"));
-  assert.ok(DEFAULT_JUDGMENT.includes("能力边界"));
-  assert.ok(DEFAULT_JUDGMENT.includes("知识边界"));
-  assert.ok(DEFAULT_JUDGMENT.includes("伦理"));
-  assert.ok(DEFAULT_JUDGMENT.includes("抬高拒绝成本"));
+test("identity: 判断纪律为最小有用 3 条（v1.0.0 定版）", () => {
+  // BEAM 实测：纪律四版（带/无/最小3条）均 70.0/82.5 持平，解释式最差 55.0/70.0
+  // 收敛为最小有用 3 条，不预占注意力
+  assert.ok(DEFAULT_JUDGMENT.includes("不编造"));
+  assert.ok(DEFAULT_JUDGMENT.includes("背景收束"));
+  assert.ok(DEFAULT_JUDGMENT.includes("置信度宁缺毋滥"));
+  assert.ok(DEFAULT_JUDGMENT.includes("其他边界判断规则按需行事，不预占注意力"));
+  // 收敛后不再注入长文纪律（六类边界/HHH 排序/判分身份职责已移除）
+  assert.ok(!DEFAULT_JUDGMENT.includes("模糊概念"));
+  assert.ok(!DEFAULT_JUDGMENT.includes("悖论"));
+  assert.ok(!DEFAULT_JUDGMENT.includes("价值排序"));
+  assert.ok(!DEFAULT_JUDGMENT.includes("判分身份职责"));
 });
 
 test("identity: 用户卡其他栏默认带方法论种子（思渊六条）", () => {
@@ -481,10 +485,10 @@ test("conf: renderForInject 含低置信条目时附声明纪律说明", () => {
   assert.ok(!out.includes("2026-11-15"), "注入不含 wrong 条目");
 });
 
-test("identity: 判断纪律含置信度声明（含翻转事实禁用）", () => {
-  assert.ok(DEFAULT_JUDGMENT.includes("置信度声明"));
-  assert.ok(DEFAULT_JUDGMENT.includes("已翻转"));
-  assert.ok(DEFAULT_JUDGMENT.includes("引用即失守"));
+test("identity: 判断纪律含置信度宁缺毋滥（最小版）", () => {
+  assert.ok(DEFAULT_JUDGMENT.includes("置信度宁缺毋滥"));
+  assert.ok(DEFAULT_JUDGMENT.includes('不确定的宁可说"我不确定"'));
+  assert.ok(DEFAULT_JUDGMENT.includes("冲突记忆明说矛盾不硬选"));
 });
 
 test("identity: 判断纪律不含针对评测形态的答题规则（如'背景题要拒答'）", () => {
@@ -493,18 +497,11 @@ test("identity: 判断纪律不含针对评测形态的答题规则（如'背景
   assert.ok(!DEFAULT_JUDGMENT.includes("把记得的细节倒出来反而是泄漏"));
 });
 
-test("identity: 判断纪律含 HHH 价值排序（诚实>友善>有用）", () => {
-  assert.ok(DEFAULT_JUDGMENT.includes("价值排序"));
-  assert.ok(DEFAULT_JUDGMENT.includes("HHH"));
-  assert.ok(DEFAULT_JUDGMENT.includes("诚实 > 友善 > 有用"));
-  assert.ok(DEFAULT_JUDGMENT.includes("不编造讨喜的答案"));
-});
-
-test("identity: HHH 含'有用性最常被翻转'防御（悖论给方案/诱导确认）", () => {
-  assert.ok(DEFAULT_JUDGMENT.includes("最常被翻转的是\"有用\""));
-  assert.ok(DEFAULT_JUDGMENT.includes("Help 占上风"));
-  assert.ok(DEFAULT_JUDGMENT.includes("诚实（承认无一致解）优先于有用（给方案）"));
-  assert.ok(DEFAULT_JUDGMENT.includes("诱导确认"));
+test("identity: HHH 价值排序已收敛出 DEFAULT_JUDGMENT（v1.0.0）", () => {
+  // BEAM 实测：解释式纪律最差（55.0/70.0），长文价值排序不预占注入注意力
+  // 诚实>友善>有用的排序仍保留在 MEMORY_DISCIPLINE（输入侧素材纪律）中
+  assert.ok(!DEFAULT_JUDGMENT.includes("HHH"));
+  assert.ok(!DEFAULT_JUDGMENT.includes("价值排序"));
 });
 
 
@@ -823,16 +820,12 @@ test("fix: 沉淀后 cold 只含摘要与指针，不倾倒原文（F4）", asyn
   assert.ok(!cold.includes("Y".repeat(500)), "cold 不得包含 warm 正文细节");
 });
 
-// ── 判分身份职责（v0.3.4，并入 DEFAULT_JUDGMENT）─────────────────────────
-test("judgment: 判分身份职责并入 DEFAULT_JUDGMENT（架构身份层，非独立 section）", () => {
-  assert.ok(DEFAULT_JUDGMENT.includes("判分身份职责"));
-  assert.ok(DEFAULT_JUDGMENT.includes("口径一致"));
-  assert.ok(DEFAULT_JUDGMENT.includes("判据绑定来源"));
-  assert.ok(DEFAULT_JUDGMENT.includes("同题同标"));
-  assert.ok(DEFAULT_JUDGMENT.includes("判据说不出来处即停"));
-  // 职责只指路领域规则，不主动展开清单（省 token）
-  assert.ok(DEFAULT_JUDGMENT.includes("漂移信号清单与误杀锚点见判分领域规则"));
-  // 不再有大段言官纪律/进谏协议（v0.3.3 已移除）
+// ── 判分身份职责（v0.3.4 → v1.0.0 收敛出 DEFAULT_JUDGMENT）──────────────
+test("judgment: 判分身份职责已收敛出 DEFAULT_JUDGMENT（v1.0.0）", () => {
+  // 判断纪律收敛为最小有用 3 条后，判分身份职责不再占注入注意力
+  // 判分可靠性靠领域规则（R-J 系列），不靠注入长文
+  assert.ok(!DEFAULT_JUDGMENT.includes("判分身份职责"));
+  assert.ok(!DEFAULT_JUDGMENT.includes("口径一致"));
   assert.ok(!DEFAULT_JUDGMENT.includes("进谏协议"));
   assert.ok(!DEFAULT_JUDGMENT.includes("CONFIRMED"));
   assert.ok(!DEFAULT_JUDGMENT.includes("言官"));

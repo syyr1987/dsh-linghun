@@ -296,9 +296,25 @@ export function createMemoryLayout(root, readText) {
     listEpisodic,
     appendJournal,
     listJournal,
-    readJournal: (day) => {
+    readJournal: (day, opts = {}) => {
       const file = join(journalDir(), `${day}.md`);
-      return readFile(file);
+      const text = readFile(file);
+      if (!text.trim()) return "";
+      const start = typeof opts?.start === "string" ? opts.start.trim() : "";
+      const end = typeof opts?.end === "string" ? opts.end.trim() : "";
+      // 无时间范围：保持整天全量（向后兼容）
+      if (!start && !end) return text;
+      const stampRe = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+      const blocks = text.split(/\n(?=\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/);
+      const kept = blocks.filter((b) => {
+        const firstLine = b.trimStart().split(/\r?\n/, 1)[0]?.trim();
+        if (!firstLine || !stampRe.test(firstLine)) return false;
+        // ISO 秒级时间戳字符串可直接字典序比较
+        if (start && firstLine < start) return false;
+        if (end && firstLine > end) return false;
+        return true;
+      });
+      return kept.join("\n");
     },
 
     /** 注入用渲染：冷储摘要 + 暖态近期记忆 + 归档索引，截断到 maxChars。
