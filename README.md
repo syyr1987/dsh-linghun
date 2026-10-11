@@ -13,13 +13,15 @@ and experience keeps flowing back into the next round. Endless planning is cut o
   paradoxes, verify before asserting, never fabricate, and watch for "raise-the-cost-of-refusal" wording.
 - **Cognition loop**: judgment has a source, feedback has attribution, improvement keeps its chain.
 - **Hippocampus (three-layer memory)**: warm buffer for recent facts → consolidation into
-  episodic archive (same-day appends, never overwrites) → cold summary injected, so the same
-  pit is not stepped into twice.
+  episodic archive (same-day appends, never overwrites) → cold summary injected. The injection
+  slot carries only high-frequency abstract experience (cold summary/rules); warm recent facts
+  are read on demand via `memory_read` — injection bandwidth for abstraction, details on query.
 - **Chronological ledger (序时账)**: `journal_read` returns the raw conversation ledger, archived
   by day — trace exactly what was said when, complementing the forgetful warm layer.
 - **Confidence-weighted forgetting**: every entry carries a confidence tag (high/medium/low).
-  Low-confidence entries inject with a 【需验证】 marker; entries overturned (`wrong`) are
-  flipped and excluded from injection — degraded confidence is a form of forgetting.
+  Low-confidence entries carry a 【需验证】 marker (visible when warm injection is enabled);
+  entries overturned (`wrong`) are flipped and excluded from injection — degraded confidence
+  is a form of forgetting.
 - **A2A memory team (linghun-assembler)**: share the cognitive-cycle team's ledger — judge
   records, editor deliveries, archivist timelines — into the main brain via `memory_read`.
 - **Self-evolution**: the agent reads and updates its own soul card via `soul_read` / `soul_update`.
@@ -71,14 +73,14 @@ Prompt sections injected:
 
 - `soul:identity` — soul card (identity anchors: the Closer architecture)
 - `soul:judgment` — boundary scan discipline (six boundary classes) + the Closer's judgment role
-- `soul:memory` — cold summary + warm recent + archive index
+- `soul:memory` — cold summary (high-frequency abstract experience) + archive index; warm recent is read on demand via `memory_read`
 
 Tools exposed:
 
 | Tool | Purpose |
 | --- | --- |
 | `memory_append` | Write a timestamped memory (fact / decision / preference / experience) |
-| `memory_read` | Read the hippocampus back |
+| `memory_read` | Read the hippocampus back (cold summary + warm recent + archive index; recent facts on demand) |
 | `memory_consolidate` | Consolidate: warm → `episodic/<date>.md`, merge cold summary |
 | `soul_read` | Read your own soul card (who I am, my boundaries, my discipline) |
 | `soul_update` | Update your own soul card (fold stable traits into identity) |
@@ -86,6 +88,11 @@ Tools exposed:
 
 Memory lives in plain Markdown under `$DSH_HOME/linghun/memory/` — readable, searchable, git-friendly.
 The soul card is at `$DSH_HOME/linghun/identity.md` — also plain Markdown. Your persona is yours; edit it however you like.
+
+> **Injection layering (v0.4.4)**: warm recent memory is NOT injected by default
+> (`linghun.memory.injectWarm` defaults to `false`) — injection bandwidth is reserved for
+> high-frequency abstract experience; recent details are read on demand via `memory_read`.
+> Set `injectWarm: true` for special cases (empty cold store, needing recent context inline).
 
 ## Engineering guardrails (v0.2)
 

@@ -112,7 +112,7 @@ test("memory: renderForInject 包含序时账索引", () => {
 test("memory: warm 有内容时注入包含近期记忆", () => {
   const { root, track, layout } = makeLayout();
   track(join(root, "warm.md"), "## 2026-09-21 [fact]\n\n用户喜欢短句。\n");
-  const out = layout.renderForInject(6000);
+  const out = layout.renderForInject(6000, { injectWarm: true });
   assert.ok(out.includes("近期记忆"));
   assert.ok(out.includes("用户喜欢短句"));
 });
@@ -123,7 +123,7 @@ test("memory: warm + cold + episodic 索引按序渲染（近期记忆优先）"
   track(join(root, "cold.md"), "# 冷储\n\n规则：先查证再下结论。\n");
   track(join(root, "warm.md"), "## 2026-09-21 [decision]\n\n决定全开源。\n");
   writeFileSync(join(root, "episodic", "2026-09-20.md"), "沉淀条目 A\n");
-  const out = layout.renderForInject(6000);
+  const out = layout.renderForInject(6000, { injectWarm: true });
   assert.ok(out.indexOf("近期记忆") < out.indexOf("冷储"));
   assert.ok(out.indexOf("冷储") < out.indexOf("归档索引"));
   assert.ok(out.includes("2026-09-20"));
@@ -132,7 +132,7 @@ test("memory: warm + cold + episodic 索引按序渲染（近期记忆优先）"
 test("memory: renderForInject 超限截断并提示", () => {
   const { root, track, layout } = makeLayout();
   track(join(root, "warm.md"), "X".repeat(1000));
-  const out = layout.renderForInject(100);
+  const out = layout.renderForInject(100, { injectWarm: true });
   assert.ok(out.includes("超出注入上限"));
   assert.ok(out.length < 200);
 });
@@ -213,7 +213,7 @@ test("time: renderForInject 按 last_access 新在前排序", () => {
       "<!-- last_access: 2026-09-28 12:00 -->",
     ].join("\n"),
   );
-  const out = layout.renderForInject(6000);
+  const out = layout.renderForInject(6000, { injectWarm: true });
   assert.ok(out.indexOf("新条目") < out.indexOf("老条目"));
 });
 
@@ -233,7 +233,7 @@ test("time: renderForInject 超限时吃灰条目被裁掉", () => {
       "<!-- last_access: 2026-09-20 08:00 -->",
     ].join("\n"),
   );
-  const out = layout.renderForInject(50);
+  const out = layout.renderForInject(50, { injectWarm: true });
   assert.ok(out.includes("新条目"));
   assert.ok(!out.includes("吃灰条目"));
 });
@@ -254,7 +254,7 @@ test("time: timeWeight=false 时保持原注入顺序", () => {
       "<!-- last_access: 2026-09-28 12:00 -->",
     ].join("\n"),
   );
-  const out = layout.renderForInject(6000, { timeWeight: false });
+  const out = layout.renderForInject(6000, { timeWeight: false, injectWarm: true });
   assert.ok(out.indexOf("老条目") < out.indexOf("新条目"));
 });
 
@@ -325,7 +325,7 @@ test("time: parseAssessment 解析 TOUCH 行（自动时间管理）", () => {
     "TOUCH: 贝叶斯更新 | 用户喜欢短句",
   ].join("\n");
   const { entry, touches } = parseAssessment(out);
-  assert.equal(entry.kind, "experience");
+  assert.equal(entry.kind, "event", "experience 旧类别映射为 event（发生了什么）");
   assert.deepEqual(touches, ["贝叶斯更新", "用户喜欢短句"]);
 });
 
@@ -475,7 +475,7 @@ test("conf: findNearDuplicateWarm 相等/包含命中，不同内容不命中", 
 test("conf: renderForInject 含低置信条目时附声明纪律说明", () => {
   const { root, track, layout } = makeLayout();
   track(join(root, "warm.md"), WARM_FIXTURE);
-  const out = layout.renderForInject(6000);
+  const out = layout.renderForInject(6000, { injectWarm: true });
   assert.ok(out.includes("记忆带置信度"));
   assert.ok(out.includes("引用存疑记忆必须先声明不确定"));
   assert.ok(!out.includes("2026-11-15"), "注入不含 wrong 条目");
@@ -597,7 +597,7 @@ test("index: 素材包文件不可读时回退默认注入（不崩溃）", () =
 });
 
 // ── 阿澄自检报告缺陷修复（v0.2.11）：F1-F5 回归 ────────────────────────────
-test("fix: summarizeWarmForCold 摘要化（wrong 跳过 / high 前缀 / 首行截断）", () => {
+test("fix: summarizeWarmForCold 摘要化（wrong 跳过 / kind+high 前缀 / 首行截断）", () => {
   const warm = [
     "## 2026-09-28 [fact] high\n\nOpenWeather key 已配置，sprint 2 截止 2026-09-30。\n第二行细节不该进摘要。",
     "## 2026-09-27 [decision] medium\n\n决定全开源，社区反馈走 Discussions。",
@@ -605,10 +605,10 @@ test("fix: summarizeWarmForCold 摘要化（wrong 跳过 / high 前缀 / 首行�
   ].join("\n\n");
   const lines = summarizeWarmForCold(warm);
   assert.equal(lines.length, 2);
-  assert.ok(lines[0].startsWith("- [high] "));
+  assert.ok(lines[0].startsWith("- [fact] [high] "), "kind 前缀在 confidence 前");
   assert.ok(lines[0].includes("OpenWeather key 已配置"));
   assert.ok(!lines[0].includes("第二行"), "只取首行锚点，不倾倒多行正文");
-  assert.ok(lines[1].startsWith("- 决定全开源"));
+  assert.ok(lines[1].startsWith("- [rule] "), "decision 旧类别映射为 rule");
   assert.ok(!lines.some((l) => l.includes("已翻转")), "wrong 条目跳过");
 });
 
@@ -627,7 +627,7 @@ test("fix: renderForInject 保暖态——冷储超预算不挤掉暖态（F4）
   const { root, track, layout } = makeLayout();
   track(join(root, "cold.md"), "冷储规则：" + "X".repeat(3000));
   track(join(root, "warm.md"), "## 2026-09-28 [fact]\n\n近期关键记忆内容。");
-  const out = layout.renderForInject(500);
+  const out = layout.renderForInject(500, { injectWarm: true });
   assert.ok(out.includes("近期关键记忆内容"), "暖态必须完整保留");
   assert.ok(out.includes("超出注入上限"), "仍有超限提示");
   assert.ok(out.length < 700);
@@ -795,9 +795,9 @@ test("fix: memory_consolidate 同日二次 append 不覆盖（F3）", async () =
   assert.ok(consolidated, "应注册 memory_consolidate 工具");
   await withEnvAsync(async () => {
     mkdirSync(memDir, { recursive: true });
-    writeFileSync(warmFile, "## 2026-09-29 [fact]\n\n第一批沉淀内容。\n", "utf8");
+    writeFileSync(warmFile, "## 2026-09-29 [legacy] medium\n\n第一批沉淀内容。\n", "utf8");
     await consolidated.execute({}, {});
-    writeFileSync(warmFile, "## 2026-09-29 [decision]\n\n第二批沉淀内容。\n", "utf8");
+    writeFileSync(warmFile, "## 2026-09-29 [legacy] medium\n\n第二批沉淀内容。\n", "utf8");
     await consolidated.execute({}, {});
   });
   const day = localDay();
@@ -807,20 +807,47 @@ test("fix: memory_consolidate 同日二次 append 不覆盖（F3）", async () =
   assert.ok((ep.match(/^## \d\d:\d\d/gm) ?? []).length === 2, "按时刻分段出现两次");
 });
 
-test("fix: 沉淀后 cold 只含摘要与指针，不倾倒原文（F4）", async () => {
+test("fix: 沉淀后 cold 只含摘要与指针，不倾倒原文（F4·legacy 分流）", async () => {
   const { tools, home, withEnvAsync } = harnessCollect(undefined);
   const memDir = join(home, ".dsh", "linghun", "memory");
   const warmFile = join(memDir, "warm.md");
   const consolidated = tools.find((t) => t.name === "memory_consolidate");
   await withEnvAsync(async () => {
     mkdirSync(memDir, { recursive: true });
-    writeFileSync(warmFile, "## 2026-09-29 [fact] high\n\n核心知识细节很长，" + "Y".repeat(500) + "\n", "utf8");
+    writeFileSync(warmFile, "## 2026-09-29 [legacy] medium\n\n核心知识细节很长，" + "Y".repeat(500) + "\n", "utf8");
     await consolidated.execute({}, {});
   });
   const cold = readFileSync(join(memDir, "cold.md"), "utf8");
-  assert.ok(cold.includes("- [high] "), "cold 应为锚点摘要行");
+  assert.ok(cold.includes("- 核心知识细节很长"), "cold 应为锚点摘要行");
   assert.ok(cold.includes("全文见 episodic/"), "cold 应带全文指针");
   assert.ok(!cold.includes("Y".repeat(500)), "cold 不得包含 warm 正文细节");
+});
+
+test("fix: 沉淀三本体分流——event→记忆本体 / fact high→知识本体 / rule→规则本体（写侧 v1）", async () => {
+  const { tools, home, withEnvAsync } = harnessCollect(undefined);
+  const memDir = join(home, ".dsh", "linghun", "memory");
+  const warmFile = join(memDir, "warm.md");
+  const consolidated = tools.find((t) => t.name === "memory_consolidate");
+  await withEnvAsync(async () => {
+    mkdirSync(memDir, { recursive: true });
+    writeFileSync(
+      warmFile,
+      [
+        "## 2026-09-29 [event] high\n\n金之杰 | 决定 | 事务表新增 4 列 | transactions 表 | 与 income 模块联动",
+        "## 2026-09-29 [fact] high\n\n事务表 | 新增列数 | 4 | 对话#188·批37",
+        "## 2026-09-29 [rule] high\n\n安全功能优先做登录校验，再做角色权限",
+      ].join("\n\n"),
+      "utf8",
+    );
+    await consolidated.execute({}, {});
+  });
+  const memoryOnt = readFileSync(join(memDir, "memory_ontology.md"), "utf8");
+  const knowledgeOnt = readFileSync(join(memDir, "knowledge_ontology.md"), "utf8");
+  const rules = readFileSync(join(memDir, "rules.md"), "utf8");
+  assert.ok(memoryOnt.includes("金之杰 | 决定"), "event 进记忆本体档案（事件时间线）");
+  assert.ok(knowledgeOnt.includes("新增列数 | 4"), "fact high 进知识本体档案（精确值）");
+  assert.ok(rules.includes("登录校验"), "rule 进规则本体");
+  assert.ok(readFileSync(warmFile, "utf8").trim() === "", "warm 全清");
 });
 
 // ── 判分身份职责（v0.3.4，并入 DEFAULT_JUDGMENT）─────────────────────────

@@ -7,7 +7,7 @@
  * prompt sections:
  *   soul:identity  — 灵魂卡（身份锚点：收口者架构）
  *   soul:judgment  — 判断纪律（边界扫描）
- *   soul:memory    — 海马体记忆注入（冷储摘要 + 暖态近期 + 归档索引）
+ *   soul:memory    — 海马体记忆注入（冷储摘要·高频高抽象经验 + 归档/序时账索引；暖态近期由 memory_read 按需读）
  *
  * tools:
  *   soul_read / soul_update      — 灵魂自进化（读/更新自己的灵魂卡）
@@ -21,6 +21,7 @@ import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { DEFAULT_IDENTITY, DEFAULT_JUDGMENT, DEFAULT_USER_CARD, MEMORY_DISCIPLINE, resolveIdentity } from "./identity.js";
 import { createMemoryLayout, parseWarm, renderWarmEntries, summarizeWarmForCold, touchWarmAccessText, findWarmEntryRef, replaceWarmEntryText, markWrongWarmEntryText, findNearDuplicateWarm } from "./memory.js";
+import { writeOntologySafe, appendRulesSafe } from "./ontology.js";
 
 const name = "linghun";
 const inject = ["systemPrompt", "tools"];
@@ -50,23 +51,38 @@ const Config = z.object({
     name: z.string().default(""),
     /** 灵魂卡内容（身份锚点）。 */
     content: z.string().default(""),
+    /** 灵魂卡总开关：false 则完全不注入身份段落。 */
     enabled: z.boolean().default(true),
+    /** 段落顺序：数字越小越靠前（多 section 模式下控制先后）。 */
     order: z.number().default(0),
     /** soul_update 拒绝超过此大小（字节）。 */
     maxBytes: z.number().default(64 * 1024),
+    /** 灵魂卡覆盖模式：complete=true 时 soul:identity 注册为 dsh-system-prompt 的
+     *  complete section（装配后唯一保留），覆盖 DSH 底座默认身份指涉；
+     *  judgment/memory 合并进同一 section，避免被 complete 抑制机制丢弃。
+     *  默认 false 保持三 section 现状。 */
+    complete: z.boolean().default(false),
   }),
   judgment: z.object({
+    /** 判断纪律开关：false 则不注入「边界扫描」判断纪律段落。 */
     enabled: z.boolean().default(true),
+    /** 段落顺序：默认排在身份段之后、记忆段之前。 */
     order: z.number().default(0.2),
   }),
   memory: z.object({
+    /** 海马体总开关：false 则记忆完全停用（不读不写不注入）。 */
     enabled: z.boolean().default(true),
+    /** 是否注入记忆：true=记+注入；false=只记不注入（模型看不到记忆）。 */
     inject: z.boolean().default(true),
+    /** 注入预算上限（字符）：每次注入的记忆总长度不超过此值。 */
     injectMaxChars: z.number().default(6000),
+    /** 段落顺序：默认排在判断纪律段之后。 */
     order: z.number().default(0.5),
     /** 时间权重：暖态注入按 last_access（最后一次被调用）新→旧排序，吃灰的沉底被裁出注入。 */
     timeWeight: z.boolean().default(true),
-    /** warm.md 上限（字节），超出先 consolidate。 */
+    /** 暖态注入开关：默认 false——注入段只承载高频高抽象经验（冷储摘要/归档索引），
+     *  暖态近期记忆由 memory_read 按需读取；true 时追加「近期记忆」注入段（特殊场景）。 */
+    injectWarm: z.boolean().default(false),
     /** 暖态记忆体积上限：与注入预算（injectMaxChars 默认 6000 字）同量级对齐，
      *  避免 warm 可合法涨到 1MB 而 98% 结构性进不了注入（F5：autoConsolidate 死代码）。 */
     maxBytes: z.number().default(64 * 1024),
@@ -77,11 +93,14 @@ const Config = z.object({
       maxChars: z.number().default(4000),
       /** 评估输出上限（token）。 */
       maxTokens: z.number().default(300),
+      /** 评估采样温度：低温度更稳定，不容易误判该沉淀/不该沉淀。 */
       temperature: z.number().default(0.2),
     }).default({}),
     /** 阈值自动沉淀：暖态达到 maxBytes*triggerRatio 时自动 consolidate 再写入，模型无感知。 */
     autoConsolidate: z.object({
+      /** 自动沉淀开关：暖态到阈值自动 consolidate，模型无感知。 */
       enabled: z.boolean().default(true),
+      /** 触发比例：warm 体积达到 maxBytes 的 80% 即自动沉淀。 */
       triggerRatio: z.number().default(0.8),
     }).default({}),
     /** 组装模式（提取侧子智能体）：从指定路径注入「预组装素材包」，替代 warm 原文注入。
@@ -90,22 +109,61 @@ const Config = z.object({
       injectPath: z.string().default(""),
       label: z.string().default("以下记忆素材由提取子智能体按当前问题从记忆库组装（仅保留相关条目，细节原样）"),
     }).default({}),
+    /** 记忆本体投影（BEAM 机制回灌）：memory_project 把 warm 按主题桶 LLM 聚合 → ontology.md，
+     *  供 linghun-assembler 检索「本体主题索引优先 + BM25 兜底」。 */
+    ontology: z.object({
+      /** 主题桶：LLM 聚合时的分组提示。空=由 LLM 自主聚类；给桶名则按桶聚合。 */
+      buckets: z.array(z.string()).default([]),
+      /** 每次投影最多主题节点数。 */
+      maxNodes: z.number().default(12),
+      /** 送入聚合的 warm 原文上限（字符）。 */
+      maxChars: z.number().default(12000),
+      /** 投影文件路径：默认 $DSH_HOME/linghun/memory/ontology.md。 */
+      path: z.string().default(""),
+    }).default({}),
+    /** 规则本体（BEAM 三本体方案·规则本体）：memory_rules 把总结经验追加进 rules.md，
+     *  供 linghun-assembler 检索「R_ALIAS 规则别名命中注入」。规则是长期经验（矛盾不硬裁/查证纪律等）。 */
+    rules: z.object({
+      /** 规则本体文件路径：默认 $DSH_HOME/linghun/memory/rules.md。 */
+      path: z.string().default(""),
+    }).default({}),
   }),
 });
 
+/** 记忆本体投影系统提示（BEAM build_ontology 机制回灌）：把暖态按主题桶聚合成主题节点。
+ *  与 assembler 侧 TAG_ALIAS 主题索引配合：主题节点优先、BM25 兜底。 */
+const ONTOLOGY_SYSTEM =
+  "你是记忆本体投影器：把一批带时间戳的记忆条目按主题聚类，输出「主题节点」式的结构化本体，供检索优先命中。\n" +
+  "要求：\n" +
+  "1. 主题用 `## 主题名` 起行；同主题条目合并成一个节点，不拆分、不遗漏；\n" +
+  "2. 每个节点正文保留关键事实：时间锚点（YYYY-MM-DD）、数字、版本号、结论——不得概括省略；\n" +
+  "3. 节点按主题重要度排序（与当前主线相关的放前），最多不超过 {maxNodes} 个主题；\n" +
+  "4. 条目间存在冲突（日期/数字/结论不一致）时，在节点内用「⚠️ 冲突：」标注两个口径，不擅自裁决；\n" +
+  "5. 只聚合已有条目，不新增、不编造、不补对话外知识；\n" +
+  "6. 输出紧凑，直接输出节点文本，不要解释。\n" +
+  "{bucketsHint}";
+
+const PROJECTION_PROMPT =
+  "请把以下记忆条目投影成本体（主题节点）：\n\n{entries}";
+
+/** 收尾评估系统提示（写侧协议 v1）：评估输出三类结构化条目（event/fact/rule），不写叙述段。
+ *  历史 bug：此字符串曾缺失 const 声明成为死代码，导致 ASSESS_SYSTEM 未定义、收尾评估被 catch 静默吞掉。 */
 const ASSESS_SYSTEM =
   "你是海马体记忆管家。你的任务：阅读一段刚结束的对话，判断其中是否有值得跨会话保留的记忆条目，以及对话中用到了哪些已有记忆。\n\n" +
-  "值得记的：明确的决策、用户的偏好/身份信息、重要事实、可复用的经验教训。\n" +
+  "值得记的：明确的事件（发生了什么）、精确事实（是什么/多少，含数字日期版本）、可执行规则（该怎么做：决策/偏好/经验纪律）。\n" +
   "不值得记的：日常寒暄、一次性问答、可即时查询的常识、情绪化表达。\n\n" +
   "输出格式（严格遵守）：\n" +
   "- 没有值得记的 → 只输出 SKIP\n" +
   "- 有值得记的 → 输出 1-3 条，每条一行：类别：内容\n" +
-  "  类别 ∈ fact（事实）/ decision（决策）/ preference（偏好）/ experience（经验）\n" +
-  "  内容用简洁自包含的中文短句或短段，不依赖原对话上下文也能读懂。\n" +
+  "  类别 ∈ event（事件）/ fact（事实，含精确值）/ rule（规则/决策/偏好，一句话可执行）\n" +
+  "  event 内容写结构行：主语 | 动作 | 宾语 | 关联实体 | 细节\n" +
+  "  fact 内容写结构行：实体 | 属性 | 值 | 来源#（值必须精确：数字/日期/版本）\n" +
+  "  rule 内容写一句可执行纪律，不依赖原对话上下文也能读懂。\n" +
   "- 对话中实际用到了【已有记忆】里的条目 → 另起一行输出：TOUCH: 片段1 | 片段2\n" +
   "  片段取该条记忆中的一段原文（越独特越好）；没用到任何已有记忆则省略此行。";
 
-/** 解析收尾评估输出：{ entry, touches }。entry 为值得沉淀的条目（无则 null）；touches 为用到的已有记忆片段列表。 */
+/** 解析收尾评估输出：{ entry, touches }。entry 为值得沉淀的条目（无则 null）；touches 为用到的已有记忆片段列表。
+ *  kind 三型（event/fact/rule）；兼容旧类别（decision/preference→rule，experience→event，identity→fact）。 */
 function parseAssessment(text) {
   const t = (text ?? "").trim();
   if (!t) return { entry: null, touches: [] };
@@ -129,9 +187,18 @@ function parseAssessment(text) {
       continue;
     }
     if (skip) continue;
-    const m = line.match(/^(fact|decision|preference|experience)[：:]\s*(.+)$/i);
+    const m = line.match(/^(event|fact|rule|decision|preference|experience|identity)[：:]\s*(.+)$/i);
     if (m && !entry) {
-      entry = { kind: m[1].toLowerCase(), content: m[2].trim() };
+      const raw = m[1].toLowerCase();
+      const kind =
+        raw === "decision" || raw === "preference"
+          ? "rule"
+          : raw === "experience"
+            ? "event"
+            : raw === "identity"
+              ? "fact"
+              : raw;
+      entry = { kind, content: m[2].trim() };
     } else if (line.length > 4 && !entry) {
       entry = { kind: "fact", content: line };
     }
@@ -278,6 +345,7 @@ function apply(ctx, config) {
     }
     const rendered = layout.renderForInject(c.memory?.injectMaxChars, {
       timeWeight: c.memory?.timeWeight,
+      injectWarm: c.memory?.injectWarm,
     });
     if (!rendered) return "";
     return `${MEMORY_DISCIPLINE}\n\n${rendered}`;
@@ -290,6 +358,22 @@ function apply(ctx, config) {
         sectionDisposers[key]();
         sectionDisposers[key] = null;
       }
+    }
+    if (cfg().identity?.complete) {
+      // 灵魂卡覆盖模式：只注册一个 complete section（身份+判断+记忆合并渲染）。
+      // dsh-system-prompt 装配时 complete section 唯一保留，
+      // DSH 底座默认身份指涉全部被抑制——灵魂卡成为唯一身份来源。
+      sectionDisposers.identity = ctx.systemPrompt.section({
+        name: SECTION_IDENTITY,
+        order: cfg().identity?.order ?? 0,
+        text: () =>
+          [renderIdentity(), renderJudgment(), renderMemory()]
+            .filter(Boolean)
+            .join("\n\n"),
+        interpolate: false,
+        complete: true,
+      });
+      return;
     }
     sectionDisposers.identity = ctx.systemPrompt.section({
       name: SECTION_IDENTITY,
@@ -393,7 +477,9 @@ function apply(ctx, config) {
   const todayName = () => nowStamp().slice(0, 10);
 
   // ── 海马体：记 / 读 / 沉淀 ──────────────────────────────────────────────
-  /** 归档暖态 → episodic/<日期>.md + 冷储摘要，然后清空暖态。工程层可复用（阈值沉淀/收尾评估共用）。
+  /** 归档暖态 → 三本体档案分流 + episodic/cold，然后清空暖态。工程层可复用（阈值沉淀/收尾评估共用）。
+   *  写侧协议 v1：event→记忆本体档案（时间线固化）、fact high→知识本体档案（精确值固化）、
+   *  rule→规则本体（rules.md）；legacy/未验证/被翻转 → episodic 全文 + cold 摘要（原 F3/F4 逻辑）。
    *  F3：episodic 用 append + 按时刻分段——同日多次沉淀不覆盖；
    *  F4：cold 只写「每条一行的锚点摘要 + 全文指针」，不倾倒 warm 原文（注入预算不被冷储吃光）。 */
   const doConsolidate = async () => {
@@ -402,24 +488,132 @@ function apply(ctx, config) {
     const stamp = nowStampSec(); // YYYY-MM-DD HH:MM:SS
     const day = stamp.slice(0, 10);
     const hm = stamp.slice(11, 16); // HH:MM
-    const episodicFile = join(layout.episodicDir(), `${day}.md`);
-    const cold = layout.readCold();
-    const lines = summarizeWarmForCold(warm);
-    const coldNext = [
-      cold.trim(),
-      `## ${day} 沉淀（${lines.length} 条）`,
-      ...lines,
-      `（全文见 episodic/${day}.md）`,
-    ].filter(Boolean).join("\n");
-    await ensureParent(episodicFile);
-    await appendFile(episodicFile, `\n## ${hm}\n\n${warm.trim()}\n`, "utf8");
-    await ensureParent(layout.coldFile());
-    await appendFile(layout.coldFile(), `\n\n${coldNext}\n`, "utf8");
+    const entries = parseWarm(warm);
+    const events = entries.filter((e) => e.kind === "event" && e.confidence !== "wrong");
+    const factsHigh = entries.filter((e) => e.kind === "fact" && e.confidence === "high");
+    const rules = entries.filter((e) => e.kind === "rule" && e.confidence !== "wrong");
+    const rest = entries.filter((e) => !events.includes(e) && !factsHigh.includes(e) && !rules.includes(e));
+
+    // 1) event → 记忆本体档案（事件时间线固化）
+    if (events.length) {
+      const file = layout.memoryOntologyFile();
+      await ensureParent(file);
+      await appendFile(file, `\n${events.map((e) => e.block).join("\n\n")}\n`, "utf8");
+      fileCache.delete(file);
+    }
+    // 2) fact high → 知识本体档案（精确值固化）
+    if (factsHigh.length) {
+      const file = layout.knowledgeOntologyFile();
+      await ensureParent(file);
+      await appendFile(file, `\n${factsHigh.map((e) => e.block).join("\n\n")}\n`, "utf8");
+      fileCache.delete(file);
+    }
+    // 3) rule → 规则本体（rules.md，主题节点式）
+    if (rules.length) {
+      const rulesPath =
+        (cfg().memory?.rules?.path ?? "").trim() ||
+        join(resolveDshHome(), "linghun", "memory", "rules.md");
+      for (const r of rules) {
+        const ruleText = r.block
+          .replace(/^## .*$/m, "")
+          .replace(/\n?<!-- last_access: [^>]+ -->/, "")
+          .trim();
+        if (ruleText) await appendRulesSafe(rulesPath, "记忆沉淀", ruleText, day);
+      }
+    }
+    // 4) 其余（legacy/未验证/被翻转）→ episodic 全文 + cold 摘要
+    if (rest.length) {
+      const episodicFile = join(layout.episodicDir(), `${day}.md`);
+      const restText = rest.map((e) => e.block).join("\n\n");
+      const cold = layout.readCold();
+      const lines = summarizeWarmForCold(restText);
+      const coldNext = [
+        cold.trim(),
+        `## ${day} 沉淀（${lines.length} 条）`,
+        ...lines,
+        `（全文见 episodic/${day}.md）`,
+      ].filter(Boolean).join("\n");
+      await ensureParent(episodicFile);
+      await appendFile(episodicFile, `\n## ${hm}\n\n${restText}\n`, "utf8");
+      await ensureParent(layout.coldFile());
+      await appendFile(layout.coldFile(), `\n\n${coldNext}\n`, "utf8");
+      fileCache.delete(episodicFile);
+      fileCache.delete(layout.coldFile());
+    }
     await writeFile(layout.warmFile(), "", "utf8");
-    fileCache.delete(episodicFile);
-    fileCache.delete(layout.coldFile());
     fileCache.delete(layout.warmFile());
     return { archived: byteLen(warm), warmCleared: true };
+  };
+
+  /** 记忆本体投影（BEAM 机制回灌）：把暖态 warm 按主题桶 LLM 聚合 → ontology.md。
+   *  供 linghun-assembler 检索「本体主题索引优先 + BM25 兜底」；投影失败返回 { ok:false, reason }。 */
+  const doOntologyProject = async (overrides = {}) => {
+    const warm = layout.readWarm();
+    if (!warm.trim()) return { ok: false, reason: "warm 为空，无内容可投影" };
+    const c = cfg().memory?.ontology ?? {};
+    const buckets = [...(overrides.buckets ?? []), ...(c.buckets ?? [])].filter((b) => typeof b === "string" && b.trim());
+    const maxNodes = overrides.maxNodes ?? c.maxNodes ?? 12;
+    const cap = overrides.maxChars ?? c.maxChars ?? 12000;
+    const entries = renderWarmEntries(parseWarm(warm), { numbered: true, includeWrong: true });
+    if (!entries.trim()) return { ok: false, reason: "warm 无可渲染条目" };
+    const trunk = entries.length > cap ? `${entries.slice(0, cap)}\n…(截断)…` : entries;
+    const bucketsHint = buckets.length
+      ? `主题桶提示（尽量对齐这些主题，可增可并）：${buckets.join(" / ")}`
+      : "主题自由聚类：按条目自然主题分桶";
+    const system = ONTOLOGY_SYSTEM
+      .replace("{maxNodes}", String(maxNodes))
+      .replace("{bucketsHint}", bucketsHint);
+    const prompt = PROJECTION_PROMPT.replace("{entries}", trunk);
+    const out = await callLlmText(system, prompt);
+    if (!out.trim()) return { ok: false, reason: "LLM 返回空投影" };
+    const path = (c.path ?? "").trim() || join(resolveDshHome(), "linghun", "memory", "ontology.md");
+    const changed = writeOntologySafe(path, out);
+    return { ok: true, path, changed, nodes: out.split(/\n(?=## )/).filter((b) => b.trim().startsWith("## ")).length };
+  };
+
+  /** 规则本体沉淀（BEAM 三本体方案·规则本体）：把一条总结经验追加进 rules.md（## 主题 节点）。
+   *  供 assembler 检索「R_ALIAS 规则别名命中注入」。失败返回 { ok:false, reason }。 */
+  const doRulesAppend = async (opts = {}) => {
+    const rule = typeof opts?.rule === "string" ? opts.rule.trim() : "";
+    const topic = typeof opts?.topic === "string" ? opts.topic.trim() : "";
+    if (!rule) return { ok: false, reason: "rule 为空" };
+    const c = cfg().memory?.rules ?? {};
+    const path = (c.path ?? "").trim() || join(resolveDshHome(), "linghun", "memory", "rules.md");
+    const stamp = new Date().toISOString().slice(0, 10);
+    return appendRulesSafe(path, topic, rule, stamp);
+  };
+
+  /** 写侧协议 v1：kind 归一化（三型收敛）+ 结构化格式校验。
+   *  兼容旧类别：decision/preference→rule（该怎么做），experience→event（发生了什么），identity→fact（是什么）。 */
+  const KIND_MAP = {
+    event: "event", fact: "fact", rule: "rule",
+    decision: "rule", preference: "rule", experience: "event", identity: "fact",
+  };
+  const normalizeKind = (k) => {
+    const key = String(k ?? "fact").trim().toLowerCase();
+    return KIND_MAP[key] ?? "fact";
+  };
+  /** 校验结构化条目格式；返回错误文案（含示例），合规返回 null。 */
+  const validateEntryFormat = (kind, content) => {
+    const c = String(content ?? "").trim();
+    if (!c) return "content 不能为空";
+    if (kind === "event") {
+      if (!c.includes("|")) {
+        return "event 条目必须是结构行：`主语 | 动作 | 宾语 | 关联实体 | 细节`（示例：`金之杰 | 决定 | 事务表新增 4 列 | transactions 表 | 与 income 模块联动`）。不要写叙述段落。";
+      }
+    }
+    if (kind === "fact") {
+      const parts = c.split("|").map((s) => s.trim()).filter(Boolean);
+      if (parts.length < 3) {
+        return "fact 条目必须是结构行：`实体 | 属性 | 值 | 来源#`，值必须精确（数字/日期/版本）（示例：`事务表 | 新增列数 | 4 | 对话#188·批37`）。不要写叙述段落。";
+      }
+    }
+    if (kind === "rule") {
+      if (c.includes("|")) {
+        return "rule 条目是一句可执行纪律，不要用结构行（示例：`安全功能优先做登录校验，再做角色权限`）。";
+      }
+    }
+    return null;
   };
 
   /** 写一条暖态记忆；开启 autoConsolidate 且达到阈值时先自动归档再写（模型无感知，不 throw）。
@@ -430,8 +624,13 @@ function apply(ctx, config) {
    *  返回 { mode: "append" | "update" | "dedupe", bytes, totalBytes }。 */
   const appendMemoryBlock = async (content, kind, opts = {}) => {
     const stamp = nowStamp();
+    const kindNorm = normalizeKind(kind);
     const conf = ["high", "medium", "low"].includes(opts.confidence) ? opts.confidence : "medium";
-    const block = `\n## ${stamp} [${kind}] ${conf}\n\n${content}\n<!-- last_access: ${stamp} -->\n`;
+    const err = validateEntryFormat(kindNorm, content);
+    if (err) {
+      throw new Error(`memory_append: ${err}`);
+    }
+    const block = `\n## ${stamp} [${kindNorm}] ${conf}\n\n${content}\n<!-- last_access: ${stamp} -->\n`;
     const file = layout.warmFile();
     const current = readCached(file) ?? "";
 
@@ -448,7 +647,7 @@ function apply(ctx, config) {
         }
         // 翻转：旧条目标 wrong，新内容追加为独立条目（默认 high，除非显式传 confidence）
         const flipped = markWrongWarmEntryText(current, opts.update);
-        const highBlock = `\n## ${stamp} [${kind}] high\n\n${content}\n<!-- last_access: ${stamp} -->\n`;
+        const highBlock = `\n## ${stamp} [${kindNorm}] high\n\n${content}\n<!-- last_access: ${stamp} -->\n`;
         const next = flipped === null ? current : flipped;
         const finalText = `${next.trimEnd()}\n${highBlock.trim()}\n`;
         await ensureParent(file);
@@ -507,13 +706,14 @@ function apply(ctx, config) {
   ctx.tools.register(defineTool({
     name: "memory_append",
     description:
-      "把一条带时间戳的 Markdown 记进海马体暖态工位（warm.md）。适合跨会话保留的事实、决策、偏好、经验。条目要简洁自包含，不要一次性倾倒。积累多了用 memory_consolidate 沉淀。\n\n置信度（confidence）：high=用户直接说/已验证；medium=推断（默认）；low=存疑/猜测/过期待验。低置信条目注入时带【低置信·需验证】标记，引用时必须声明不确定。\n\n更新（update）：发现旧条目已被推翻/变更时，传 memory_read 返回的编号（如 [3]）或该条目内容片段——旧条目标记为 wrong（被翻转，不再注入），新内容另起一条（默认高置信）。近似重复内容会自动合并不追加。",
+      "把一条带时间戳的**结构化认知条目**记进海马体暖态工位（warm.md），不是写叙述摘要。\n\n类别（kind）三型：\n- event（事件=记忆本体）：`主语 | 动作 | 宾语 | 关联实体 | 细节`——记录发生了什么；时间由条目自带。\n- fact（事实=知识本体）：`实体 | 属性 | 值 | 来源#`——记录是什么/多少，值必须精确（数字/日期/版本），来源指对话批次/事件。\n- rule（规则=规则本体）：一句可执行纪律（决策/偏好/经验），不要用结构行。\n\n一条目一事实，不要一次性倾倒。积累多了用 memory_consolidate 沉淀（按类别移出到本体档案：event→记忆本体时间线、fact 高置信→知识本体、rule→规则本体）。\n\n置信度（confidence）：high=用户直接说/已验证；medium=推断（默认）；low=存疑/猜测/过期待验。低置信条目注入时带【低置信·需验证】标记，引用时必须声明不确定。\n\n更新（update）：发现旧条目已被推翻/变更时，传 memory_read 返回的编号（如 [3]）或该条目内容片段——旧条目标记为 wrong（被翻转，不再注入），新内容另起一条（默认高置信）。近似重复内容会自动合并不追加。",
     parameters: {
       kind: {
         type: "string",
-        description: "条目类别：fact（事实）/ decision（决策）/ preference（偏好）/ experience（经验）/ identity（用户身份与背景信息），默认 fact",
+        enum: ["event", "fact", "rule"],
+        description: "条目类别（写侧协议三型）：event（事件，结构行 `主语|动作|宾语|关联|细节`）/ fact（事实，结构行 `实体|属性|值|来源#`，值精确）/ rule（规则，一句可执行纪律），默认 fact",
       },
-      content: { type: "string", required: true, description: "要记住的 markdown 内容，简洁自包含" },
+      content: { type: "string", required: true, description: "要记住的结构化内容：event/fact 用 `|` 分隔的结构行（见 kind 说明），rule 用一句可执行纪律。不要写叙述段落" },
       confidence: {
         type: "string",
         enum: ["high", "medium", "low"],
@@ -561,8 +761,13 @@ function apply(ctx, config) {
   ctx.tools.register(defineTool({
     name: "memory_read",
     description:
-      "读取海马体记忆：冷储摘要（cold.md）+ 暖态近期（warm.md）+ 归档索引。需要细节时可读完整内容。读≠用：读到的条目只有实际派上用场，才用 memory_touch 标记（标记=活跃，吃灰管理）。",
+      "读取海马体记忆。kind 可选：event→只读记忆本体档案（事件时间线）、fact→只读知识本体档案（精确值）、rule→只读规则本体（纪律）、不传→冷储摘要（cold.md）+ 暖态近期（warm.md）+ 归档索引。需要细节时可读完整内容。读≠用：读到的条目只有实际派上用场，才用 memory_touch 标记（标记=活跃，吃灰管理）。",
     parameters: {
+      kind: {
+        type: "string",
+        enum: ["event", "fact", "rule"],
+        description: "可选。只读某个本体档案：event=记忆本体（事件时间线）/ fact=知识本体（精确值）/ rule=规则本体（纪律）；不传则读综合视图（cold+warm+索引）",
+      },
       full: {
         type: "boolean",
         description: "true 返回完整内容（可能很长）；false 返回注入摘要，默认 false",
@@ -592,6 +797,30 @@ function apply(ctx, config) {
       const c = cfg();
       const max = c.memory?.injectMaxChars ?? 6000;
       const useFull = args?.full === true;
+      // kind 直读本体档案：查证=查节点（知识本体精确值/规则本体纪律/记忆本体事件时间线）
+      if (args?.kind) {
+        let raw;
+        if (args.kind === "event") {
+          raw = layout.readMemoryOntology();
+        } else if (args.kind === "fact") {
+          raw = layout.readKnowledgeOntology();
+        } else if (args.kind === "rule") {
+          const rulesPath =
+            (c.memory?.rules?.path ?? "").trim() ||
+            join(resolveDshHome(), "linghun", "memory", "rules.md");
+          raw = readFileSync(rulesPath, "utf8");
+        } else {
+          return { exists: false, bytes: 0, content: "" };
+        }
+        if (!raw.trim()) return { exists: false, bytes: 0, content: "" };
+        const limit = useFull ? 50000 : max;
+        const truncated = raw.length > limit;
+        return {
+          exists: true,
+          bytes: byteLen(raw),
+          content: truncated ? `${raw.slice(0, limit)}\n…(截断)…` : raw,
+        };
+      }
       const cold = layout.readCold();
       const warm = renderWarmEntries(parseWarm(layout.readWarm()), {
         numbered: true,
@@ -624,11 +853,19 @@ function apply(ctx, config) {
   ctx.tools.register(defineTool({
     name: "journal_read",
     description:
-      "读取序时账（journal）：原始对话流水，按天归档、全量不筛选。不传 date 返回所有天的索引（日期 + 条数）；传 date（YYYY-MM-DD）返回该天完整流水。用于追溯'当时到底说了什么'——序时账与暖态/冷储互补：warm 是遗忘梯度的近期摘要，journal 是完整原始记录。",
+      "读取序时账（journal）：原始对话流水，按发生时间（精确到秒）归档、全量不筛选。不传 date 返回所有天的索引（日期 + 条数）；传 date（YYYY-MM-DD）返回该天完整流水。传 start/end（YYYY-MM-DD HH:MM:SS，精确到秒）可**按任务时间范围精确检索**：只返回该时间窗口内的流水条目，避免翻整日全量（单日流水过大时框架会截断中间段，务必用时间范围收窄）。start/end 可跨天，二者至少传一个即可。用于追溯'当时到底说了什么'——序时账与暖态/冷储互补：warm 是遗忘梯度的近期摘要，journal 是完整原始记录。",
     parameters: {
       date: {
         type: "string",
         description: "YYYY-MM-DD，读取指定日期的完整流水；不传则列出所有天索引",
+      },
+      start: {
+        type: "string",
+        description: "YYYY-MM-DD HH:MM:SS，检索窗口起始（含，精确到秒）；与 end 至少传一个，可跨天",
+      },
+      end: {
+        type: "string",
+        description: "YYYY-MM-DD HH:MM:SS，检索窗口结束（含，精确到秒）；与 start 至少传一个，可跨天",
       },
     },
     output: {
@@ -653,20 +890,47 @@ function apply(ctx, config) {
     isConcurrencySafe: () => true,
     async execute(args, exec) {
       const day = String(args?.date ?? "").trim();
-      if (day) {
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
-          return { exists: false, bytes: 0, content: "date 格式应为 YYYY-MM-DD" };
-        }
-        const content = layout.readJournal(day);
-        if (!content.trim()) return { exists: false, bytes: 0, content: `该日期（${day}）暂无流水。` };
-        return { exists: true, bytes: byteLen(content), content };
+      const start = String(args?.start ?? "").trim();
+      const end = String(args?.end ?? "").trim();
+      const stampRe = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+      if (day && !/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+        return { exists: false, bytes: 0, content: "date 格式应为 YYYY-MM-DD" };
       }
+      if ((start && !stampRe.test(start)) || (end && !stampRe.test(end))) {
+        return { exists: false, bytes: 0, content: "start/end 格式应为 YYYY-MM-DD HH:MM:SS（精确到秒）" };
+      }
+      if (start && end && start > end) {
+        return { exists: false, bytes: 0, content: "start 应早于等于 end" };
+      }
+      // 无时间范围：沿用原逻辑（整天全量 / 天索引）
+      if (!start && !end) {
+        if (day) {
+          const content = layout.readJournal(day);
+          if (!content.trim()) return { exists: false, bytes: 0, content: `该日期（${day}）暂无流水。` };
+          return { exists: true, bytes: byteLen(content), content };
+        }
+        const days = layout.listJournal();
+        if (!days.length) return { exists: false, bytes: 0, content: "序时账为空（尚无流水）。" };
+        const rows = days
+          .map((j) => `- ${j.name}（${j.entries} 条流水）`)
+          .join("\n");
+        return { exists: true, bytes: byteLen(rows), content: rows };
+      }
+      // 有时间范围：只扫窗口覆盖的日期文件，块级过滤精确到秒
       const days = layout.listJournal();
       if (!days.length) return { exists: false, bytes: 0, content: "序时账为空（尚无流水）。" };
-      const rows = days
-        .map((j) => `- ${j.name}（${j.entries} 条流水）`)
-        .join("\n");
-      return { exists: true, bytes: byteLen(rows), content: rows };
+      const startDay = start.slice(0, 10);
+      const endDay = end.slice(0, 10);
+      const scanDays = days.filter((j) => j.name >= startDay && j.name <= endDay);
+      if (!scanDays.length) return { exists: false, bytes: 0, content: `范围内（${start} ~ ${end}）暂无流水。` };
+      const parts = [];
+      for (const j of scanDays) {
+        const content = layout.readJournal(j.name, { start, end });
+        if (content.trim()) parts.push(`## ${j.name}\n${content.trim()}`);
+      }
+      if (!parts.length) return { exists: false, bytes: 0, content: `范围内（${start} ~ ${end}）暂无流水。` };
+      const content = parts.join("\n\n");
+      return { exists: true, bytes: byteLen(content), content };
     },
   }));
 
@@ -729,6 +993,77 @@ function apply(ctx, config) {
     isConcurrencySafe: () => false,
     async execute(args, exec) {
       return doConsolidate();
+    },
+  }));
+
+  ctx.tools.register(defineTool({
+    name: "memory_project",
+    description:
+      "记忆本体投影（BEAM 验证机制）：把暖态工位（warm.md）按主题桶 LLM 聚合成本体投影（ontology.md）——同主题条目合并为主题节点，保留时间锚点/数字/版本/结论。供记忆提取子智能体（linghun-assembler）检索时「本体主题索引优先 + BM25 兜底」，替代纯 BM25 的分散命中。适合在 warm 条目多、问题常跨主题时执行；本体文件可在多次投影间累积（每次用当前暖态重投影）。",
+    parameters: {
+      buckets: {
+        type: "array",
+        items: { type: "string" },
+        description: "可选。主题桶提示（如 [\"RAG 管道\", \"向量数据库\", \"成本估算\"]）；不传由 LLM 按自然主题自由聚类",
+      },
+    },
+    output: {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          ok: { type: "boolean" },
+          path: { type: "string" },
+          changed: { type: "boolean" },
+          nodes: { type: "integer" },
+          reason: { type: "string" },
+        },
+      },
+      render: (_args, value) => [
+        { type: "text", text: value.ok ? `记忆本体投影完成：${value.nodes} 个主题节点 → ${value.path}${value.changed ? "（已更新）" : "（内容未变）"}` : `记忆本体投影未完成：${value.reason ?? "未知原因"}` },
+      ],
+    },
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      return doOntologyProject({
+        buckets: Array.isArray(args?.buckets) ? args.buckets.filter((b) => typeof b === "string" && b.trim()) : [],
+      });
+    },
+  }));
+
+  ctx.tools.register(defineTool({
+    name: "memory_rules",
+    description:
+      "规则本体沉淀（BEAM 三本体方案·规则本体）：把一条可复用的总结经验追加进规则本体 rules.md（## 主题 节点下追加 - 规则行），供记忆提取子智能体（linghun-assembler）检索时 R_ALIAS 规则别名命中注入。规则是长期稳定的经验（如「矛盾不硬裁」「先查证再下结论」「记忆注入是素材不替代判定」），不是一次性事实——适合在实践得出可复用结论后调用；同主题规则自动聚合在同一节点下。",
+    parameters: {
+      rule: {
+        type: "string",
+        description: "规则内容（一句话可复用经验，如「矛盾不硬裁：悖论场景承认无一致解，不强行自洽」）",
+      },
+      topic: {
+        type: "string",
+        description: "规则主题（如「判断纪律」「记忆纪律」「评测纪律」）；同主题规则聚合在一个节点下",
+      },
+    },
+    output: {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          ok: { type: "boolean" },
+          changed: { type: "boolean" },
+          path: { type: "string" },
+          theme: { type: "string" },
+          reason: { type: "string" },
+        },
+      },
+      render: (_args, value) => [
+        { type: "text", text: value.ok ? `规则本体已沉淀：${value.theme} → ${value.path}` : `规则本体沉淀失败：${value.reason ?? "未知原因"}` },
+      ],
+    },
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      return doRulesAppend({ rule: args?.rule, topic: args?.topic });
     },
   }));
 
