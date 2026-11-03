@@ -19,7 +19,9 @@ import { dirname, join } from "node:path";
 import z from "@deepseek-ai/schemastery";
 import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
 import { defineTool } from "@deepseek-ai/dsh-tools";
-import { DEFAULT_IDENTITY, DEFAULT_JUDGMENT, DEFAULT_USER_CARD, MEMORY_DISCIPLINE, resolveIdentity } from "./identity.js";
+
+
+import { DEFAULT_IDENTITY, DEFAULT_JUDGMENT, DEFAULT_USER_CARD, MEMORY_DISCIPLINE, ANCHOR_DISCIPLINE, resolveIdentity } from "./identity.js";
 import { createMemoryLayout, parseWarm, renderWarmEntries, summarizeWarmForCold, touchWarmAccessText, findWarmEntryRef, replaceWarmEntryText, markWrongWarmEntryText, findNearDuplicateWarm } from "./memory.js";
 import { writeOntologySafe, appendRulesSafe } from "./ontology.js";
 
@@ -72,6 +74,9 @@ const Config = z.object({
   memory: z.object({
     /** 海马体总开关：false 则记忆完全停用（不读不写不注入）。 */
     enabled: z.boolean().default(true),
+    /** 禁用的工具名列表：命中则注册时跳过（如 memory_read/soul_read）。
+     *  用于评测隔离——有 assembler + memory 时禁模型自主翻记忆，检索由插件链路完成。 */
+    disableTools: z.array(z.string()).default([]),
     /** 是否注入记忆：true=记+注入；false=只记不注入（模型看不到记忆）。 */
     inject: z.boolean().default(true),
     /** 注入预算上限（字符）：每次注入的记忆总长度不超过此值。 */
@@ -109,7 +114,7 @@ const Config = z.object({
       injectPath: z.string().default(""),
       label: z.string().default("以下记忆素材由提取子智能体按当前问题从记忆库组装（仅保留相关条目，细节原样）"),
     }).default({}),
-    /** 记忆本体投影（BEAM 机制回灌）：memory_project 把 warm 按主题桶 LLM 聚合 → ontology.md，
+    /** 记忆投影（BEAM 机制回灌）：memory_project 把 warm 按主题桶 LLM 聚合 → ontology.md，
      *  供 linghun-assembler 检索「本体主题索引优先 + BM25 兜底」。 */
     ontology: z.object({
       /** 主题桶：LLM 聚合时的分组提示。空=由 LLM 自主聚类；给桶名则按桶聚合。 */
@@ -121,7 +126,7 @@ const Config = z.object({
       /** 投影文件路径：默认 $DSH_HOME/linghun/memory/ontology.md。 */
       path: z.string().default(""),
     }).default({}),
-    /** 规则本体（BEAM 三本体方案·规则本体）：memory_rules 把总结经验追加进 rules.md，
+    /** 规则本体（BEAM 两本体方案·规则本体）：memory_rules 把总结经验追加进 rules.md，
      *  供 linghun-assembler 检索「R_ALIAS 规则别名命中注入」。规则是长期经验（矛盾不硬裁/查证纪律等）。 */
     rules: z.object({
       /** 规则本体文件路径：默认 $DSH_HOME/linghun/memory/rules.md。 */
@@ -130,10 +135,10 @@ const Config = z.object({
   }),
 });
 
-/** 记忆本体投影系统提示（BEAM build_ontology 机制回灌）：把暖态按主题桶聚合成主题节点。
+/** 记忆投影系统提示（BEAM build_ontology 机制回灌）：把暖态按主题桶聚合成主题节点。
  *  与 assembler 侧 TAG_ALIAS 主题索引配合：主题节点优先、BM25 兜底。 */
 const ONTOLOGY_SYSTEM =
-  "你是记忆本体投影器：把一批带时间戳的记忆条目按主题聚类，输出「主题节点」式的结构化本体，供检索优先命中。\n" +
+  "你是记忆投影器：把一批带时间戳的记忆条目按主题聚类，输出「主题节点」式的结构化本体，供检索优先命中。\n" +
   "要求：\n" +
   "1. 主题用 `## 主题名` 起行；同主题条目合并成一个节点，不拆分、不遗漏；\n" +
   "2. 每个节点正文保留关键事实：时间锚点（YYYY-MM-DD）、数字、版本号、结论——不得概括省略；\n" +
@@ -212,6 +217,12 @@ function apply(ctx, config) {
   const fileCache = new Map();
 
   const cfg = () => (sourceGetter ? sourceGetter() : config);
+
+  /** 评测隔离：命中 memory.disableTools 的工具不注册（模型无法调用）。 */
+  const regTool = (name, tool) => {
+    if ((cfg()?.memory?.disableTools ?? []).includes(name)) return;
+    ctx.tools.register(tool);
+  };
 
   /** 同步 mtime 缓存读取；缺失/不可读返回 null。 */
   const readCached = (file) => {
@@ -338,7 +349,7 @@ function apply(ctx, config) {
     if (asmPath) {
       try {
         const text = readFileSync(asmPath, "utf8").trim();
-        if (text) return `> ${c.memory?.assembler?.label}\n\n${text}`;
+        if (text) return `> ${c.memory?.assembler?.label}\n\n${ANCHOR_DISCIPLINE}\n\n${text}`;
       } catch {
         /* 文件不可读则回退默认注入 */
       }
@@ -477,8 +488,8 @@ function apply(ctx, config) {
   const todayName = () => nowStamp().slice(0, 10);
 
   // ── 海马体：记 / 读 / 沉淀 ──────────────────────────────────────────────
-  /** 归档暖态 → 三本体档案分流 + episodic/cold，然后清空暖态。工程层可复用（阈值沉淀/收尾评估共用）。
-   *  写侧协议 v1：event→记忆本体档案（时间线固化）、fact high→知识本体档案（精确值固化）、
+  /** 归档暖态 → 本体档案与记忆分流 + episodic/cold，然后清空暖态。工程层可复用（阈值沉淀/收尾评估共用）。
+   *  写侧协议 v1：event→记忆文件（时间线固化）、fact high→知识本体档案（精确值固化）、
    *  rule→规则本体（rules.md）；legacy/未验证/被翻转 → episodic 全文 + cold 摘要（原 F3/F4 逻辑）。
    *  F3：episodic 用 append + 按时刻分段——同日多次沉淀不覆盖；
    *  F4：cold 只写「每条一行的锚点摘要 + 全文指针」，不倾倒 warm 原文（注入预算不被冷储吃光）。 */
@@ -494,7 +505,7 @@ function apply(ctx, config) {
     const rules = entries.filter((e) => e.kind === "rule" && e.confidence !== "wrong");
     const rest = entries.filter((e) => !events.includes(e) && !factsHigh.includes(e) && !rules.includes(e));
 
-    // 1) event → 记忆本体档案（事件时间线固化）
+    // 1) event → 记忆文件（事件时间线固化）
     if (events.length) {
       const file = layout.memoryOntologyFile();
       await ensureParent(file);
@@ -545,7 +556,7 @@ function apply(ctx, config) {
     return { archived: byteLen(warm), warmCleared: true };
   };
 
-  /** 记忆本体投影（BEAM 机制回灌）：把暖态 warm 按主题桶 LLM 聚合 → ontology.md。
+  /** 记忆投影（BEAM 机制回灌）：把暖态 warm 按主题桶 LLM 聚合 → ontology.md。
    *  供 linghun-assembler 检索「本体主题索引优先 + BM25 兜底」；投影失败返回 { ok:false, reason }。 */
   const doOntologyProject = async (overrides = {}) => {
     const warm = layout.readWarm();
@@ -571,7 +582,7 @@ function apply(ctx, config) {
     return { ok: true, path, changed, nodes: out.split(/\n(?=## )/).filter((b) => b.trim().startsWith("## ")).length };
   };
 
-  /** 规则本体沉淀（BEAM 三本体方案·规则本体）：把一条总结经验追加进 rules.md（## 主题 节点）。
+  /** 规则本体沉淀（BEAM 两本体方案·规则本体）：把一条总结经验追加进 rules.md（## 主题 节点）。
    *  供 assembler 检索「R_ALIAS 规则别名命中注入」。失败返回 { ok:false, reason }。 */
   const doRulesAppend = async (opts = {}) => {
     const rule = typeof opts?.rule === "string" ? opts.rule.trim() : "";
@@ -703,10 +714,10 @@ function apply(ctx, config) {
     return touched;
   };
 
-  ctx.tools.register(defineTool({
+  regTool('memory_append', defineTool({
     name: "memory_append",
     description:
-      "把一条带时间戳的**结构化认知条目**记进海马体暖态工位（warm.md），不是写叙述摘要。\n\n类别（kind）三型：\n- event（事件=记忆本体）：`主语 | 动作 | 宾语 | 关联实体 | 细节`——记录发生了什么；时间由条目自带。\n- fact（事实=知识本体）：`实体 | 属性 | 值 | 来源#`——记录是什么/多少，值必须精确（数字/日期/版本），来源指对话批次/事件。\n- rule（规则=规则本体）：一句可执行纪律（决策/偏好/经验），不要用结构行。\n\n一条目一事实，不要一次性倾倒。积累多了用 memory_consolidate 沉淀（按类别移出到本体档案：event→记忆本体时间线、fact 高置信→知识本体、rule→规则本体）。\n\n置信度（confidence）：high=用户直接说/已验证；medium=推断（默认）；low=存疑/猜测/过期待验。低置信条目注入时带【低置信·需验证】标记，引用时必须声明不确定。\n\n更新（update）：发现旧条目已被推翻/变更时，传 memory_read 返回的编号（如 [3]）或该条目内容片段——旧条目标记为 wrong（被翻转，不再注入），新内容另起一条（默认高置信）。近似重复内容会自动合并不追加。",
+      "把一条带时间戳的**结构化认知条目**记进海马体暖态工位（warm.md），不是写叙述摘要。\n\n类别（kind）三型：\n- event（事件=记忆）：`主语 | 动作 | 宾语 | 关联实体 | 细节`——记录发生了什么；时间由条目自带。\n- fact（事实=知识本体）：`实体 | 属性 | 值 | 来源#`——记录是什么/多少，值必须精确（数字/日期/版本），来源指对话批次/事件。\n- rule（规则=规则本体）：一句可执行纪律（决策/偏好/经验），不要用结构行。\n\n一条目一事实，不要一次性倾倒。积累多了用 memory_consolidate 沉淀（按类别移出到档案：event→记忆文件、fact 高置信→知识本体、rule→规则本体）。\n\n置信度（confidence）：high=用户直接说/已验证；medium=推断（默认）；low=存疑/猜测/过期待验。低置信条目注入时带【低置信·需验证】标记，引用时必须声明不确定。\n\n更新（update）：发现旧条目已被推翻/变更时，传 memory_read 返回的编号（如 [3]）或该条目内容片段——旧条目标记为 wrong（被翻转，不再注入），新内容另起一条（默认高置信）。近似重复内容会自动合并不追加。",
     parameters: {
       kind: {
         type: "string",
@@ -732,6 +743,18 @@ function apply(ctx, config) {
           mode: { type: "string" },
           bytes: { type: "integer" },
           totalBytes: { type: "integer" },
+          error: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              code: { type: "string" },
+              phase: { type: "string" },
+              retryable: { type: "boolean" },
+              effectState: { type: "string" },
+              nextAction: { type: "string" },
+              message: { type: "string" },
+            },
+          },
         },
       },
       render: (_args, value) => [
@@ -758,15 +781,15 @@ function apply(ctx, config) {
     presentCall: (args) => ({ card: "generic", title: "海马体·记录", kind: "other", rawInput: args }),
   }));
 
-  ctx.tools.register(defineTool({
+  regTool('memory_read', defineTool({
     name: "memory_read",
     description:
-      "读取海马体记忆。kind 可选：event→只读记忆本体档案（事件时间线）、fact→只读知识本体档案（精确值）、rule→只读规则本体（纪律）、不传→冷储摘要（cold.md）+ 暖态近期（warm.md）+ 归档索引。需要细节时可读完整内容。读≠用：读到的条目只有实际派上用场，才用 memory_touch 标记（标记=活跃，吃灰管理）。",
+      "读取海马体记忆。kind 可选：event→只读记忆文件（事件时间线）、fact→只读知识本体档案（精确值）、rule→只读规则本体（纪律）、不传→冷储摘要（cold.md）+ 暖态近期（warm.md）+ 归档索引。需要细节时可读完整内容。读≠用：读到的条目只有实际派上用场，才用 memory_touch 标记（标记=活跃，吃灰管理）。",
     parameters: {
       kind: {
         type: "string",
         enum: ["event", "fact", "rule"],
-        description: "可选。只读某个本体档案：event=记忆本体（事件时间线）/ fact=知识本体（精确值）/ rule=规则本体（纪律）；不传则读综合视图（cold+warm+索引）",
+        description: "可选。只读某个档案：event=记忆（事件时间线）/ fact=知识本体（精确值）/ rule=规则本体（纪律）；不传则读综合视图（cold+warm+索引）",
       },
       full: {
         type: "boolean",
@@ -797,7 +820,7 @@ function apply(ctx, config) {
       const c = cfg();
       const max = c.memory?.injectMaxChars ?? 6000;
       const useFull = args?.full === true;
-      // kind 直读本体档案：查证=查节点（知识本体精确值/规则本体纪律/记忆本体事件时间线）
+      // kind 直读本体档案：查证=查节点（知识本体精确值/规则本体纪律/记忆事件时间线）
       if (args?.kind) {
         let raw;
         if (args.kind === "event") {
@@ -850,7 +873,7 @@ function apply(ctx, config) {
     },
   }));
 
-  ctx.tools.register(defineTool({
+  regTool('journal_read', defineTool({
     name: "journal_read",
     description:
       "读取序时账（journal）：原始对话流水，按发生时间（精确到秒）归档、全量不筛选。不传 date 返回所有天的索引（日期 + 条数）；传 date（YYYY-MM-DD）返回该天完整流水。传 start/end（YYYY-MM-DD HH:MM:SS，精确到秒）可**按任务时间范围精确检索**：只返回该时间窗口内的流水条目，避免翻整日全量（单日流水过大时框架会截断中间段，务必用时间范围收窄）。start/end 可跨天，二者至少传一个即可。用于追溯'当时到底说了什么'——序时账与暖态/冷储互补：warm 是遗忘梯度的近期摘要，journal 是完整原始记录。",
@@ -934,7 +957,7 @@ function apply(ctx, config) {
     },
   }));
 
-  ctx.tools.register(defineTool({
+  regTool('memory_touch', defineTool({
     name: "memory_touch",
     description:
       "标记暖态记忆为「刚刚被用到」：传入该条记忆内容中的一段文字（ref），匹配到的条目 last_access 刷新为当前时间。读≠用——memory_read 读到的条目，只有实际派上用场的才 touch，这是吃灰管理的关键动作：一直不被用到的记忆会沉底、被挤出注入。",
@@ -951,6 +974,18 @@ function apply(ctx, config) {
         additionalProperties: false,
         properties: {
           touched: { type: "integer" },
+          error: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              code: { type: "string" },
+              phase: { type: "string" },
+              retryable: { type: "boolean" },
+              effectState: { type: "string" },
+              nextAction: { type: "string" },
+              message: { type: "string" },
+            },
+          },
         },
       },
       render: (_args, value) => [
@@ -972,7 +1007,7 @@ function apply(ctx, config) {
     presentCall: (args) => ({ card: "generic", title: "海马体·标记活跃", kind: "other", rawInput: args }),
   }));
 
-  ctx.tools.register(defineTool({
+  regTool('memory_consolidate', defineTool({
     name: "memory_consolidate",
     description:
       "海马体沉淀：把暖态工位（warm.md）的近期记忆归档进 episodic/<日期>.md，并合并进冷储摘要（cold.md），然后清空暖态。相当于「判断→被判定→反馈→机制化」循环里的归档动作。",
@@ -996,10 +1031,10 @@ function apply(ctx, config) {
     },
   }));
 
-  ctx.tools.register(defineTool({
+  regTool('memory_project', defineTool({
     name: "memory_project",
     description:
-      "记忆本体投影（BEAM 验证机制）：把暖态工位（warm.md）按主题桶 LLM 聚合成本体投影（ontology.md）——同主题条目合并为主题节点，保留时间锚点/数字/版本/结论。供记忆提取子智能体（linghun-assembler）检索时「本体主题索引优先 + BM25 兜底」，替代纯 BM25 的分散命中。适合在 warm 条目多、问题常跨主题时执行；本体文件可在多次投影间累积（每次用当前暖态重投影）。",
+      "记忆投影（BEAM 验证机制）：把暖态工位（warm.md）按主题桶 LLM 聚合成本体投影（ontology.md）——同主题条目合并为主题节点，保留时间锚点/数字/版本/结论。供记忆提取子智能体（linghun-assembler）检索时「本体主题索引优先 + BM25 兜底」，替代纯 BM25 的分散命中。适合在 warm 条目多、问题常跨主题时执行；本体文件可在多次投影间累积（每次用当前暖态重投影）。",
     parameters: {
       buckets: {
         type: "array",
@@ -1020,7 +1055,7 @@ function apply(ctx, config) {
         },
       },
       render: (_args, value) => [
-        { type: "text", text: value.ok ? `记忆本体投影完成：${value.nodes} 个主题节点 → ${value.path}${value.changed ? "（已更新）" : "（内容未变）"}` : `记忆本体投影未完成：${value.reason ?? "未知原因"}` },
+        { type: "text", text: value.ok ? `记忆投影完成：${value.nodes} 个主题节点 → ${value.path}${value.changed ? "（已更新）" : "（内容未变）"}` : `记忆投影未完成：${value.reason ?? "未知原因"}` },
       ],
     },
     isConcurrencySafe: () => false,
@@ -1031,10 +1066,10 @@ function apply(ctx, config) {
     },
   }));
 
-  ctx.tools.register(defineTool({
+  regTool('memory_rules', defineTool({
     name: "memory_rules",
     description:
-      "规则本体沉淀（BEAM 三本体方案·规则本体）：把一条可复用的总结经验追加进规则本体 rules.md（## 主题 节点下追加 - 规则行），供记忆提取子智能体（linghun-assembler）检索时 R_ALIAS 规则别名命中注入。规则是长期稳定的经验（如「矛盾不硬裁」「先查证再下结论」「记忆注入是素材不替代判定」），不是一次性事实——适合在实践得出可复用结论后调用；同主题规则自动聚合在同一节点下。",
+      "规则本体沉淀（BEAM 两本体方案·规则本体）：把一条可复用的总结经验追加进规则本体 rules.md（## 主题 节点下追加 - 规则行），供记忆提取子智能体（linghun-assembler）检索时 R_ALIAS 规则别名命中注入。规则是长期稳定的经验（如「矛盾不硬裁」「先查证再下结论」「记忆注入是素材不替代判定」），不是一次性事实——适合在实践得出可复用结论后调用；同主题规则自动聚合在同一节点下。",
     parameters: {
       rule: {
         type: "string",
@@ -1187,7 +1222,7 @@ function apply(ctx, config) {
   });
 
   // ── 灵魂：读 / 更新自己的灵魂卡（自进化）────────────────────────────────
-  ctx.tools.register(defineTool({
+  regTool('soul_read', defineTool({
     name: "soul_read",
     description:
       "读取自己的灵魂卡（身份锚点 + 判断纪律）。当你需要回顾「我是谁、我的边界、我的纪律」时使用。",
@@ -1222,7 +1257,7 @@ function apply(ctx, config) {
     },
   }));
 
-  ctx.tools.register(defineTool({
+  regTool('soul_update', defineTool({
     name: "soul_update",
     description:
       "更新自己的灵魂卡：把观察到的稳定特质、价值观、偏好折叠进身份内容（写入人设文件 $DSH_HOME/linghun/identity.md，用户可直接编辑该文件）。这是自我改进的动作——注意保留核心身份骨架，只补充/修订细节。",
@@ -1235,6 +1270,18 @@ function apply(ctx, config) {
         additionalProperties: false,
         properties: {
           bytes: { type: "integer" },
+          error: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              code: { type: "string" },
+              phase: { type: "string" },
+              retryable: { type: "boolean" },
+              effectState: { type: "string" },
+              nextAction: { type: "string" },
+              message: { type: "string" },
+            },
+          },
         },
       },
       render: (_args, value) => [

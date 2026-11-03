@@ -9,19 +9,23 @@
  *   ├── episodic/        # 冷储归档：YYYY-MM-DD.md（memory_consolidate 时移入）
  *   └── journal/         # 序时账：YYYY-MM-DD.md 原始流水（每次对话全量 append，不筛选）
  */
-import { appendFileSync, mkdirSync, readdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";
 
 export const WARM = "warm.md";
 export const COLD = "cold.md";
 export const EPISODIC_DIR = "episodic";
 export const JOURNAL_DIR = "journal";
-/** 三本体档案（warm 移出后的固化层，结构化条目追加）：
- *  记忆本体 = 事件时间线档案；知识本体 = 精确值档案。规则本体沿用 rules.md（ontology.js）。 */
-export const MEMORY_ONTOLOGY = "memory_ontology.md";
+/** 本体档案与记忆文件（warm 移出后的固化层，结构化条目追加）：
+ *  记忆 = 事件时间线文件；知识本体 = 精确值档案。规则本体沿用 rules.md（ontology.js）。 */
+export const MEMORY_TIMELINE = "memory_timeline.md";
+/** 旧文件名（记忆本体时代遗留），只读兼容：memory_timeline.md 不存在时回退读它。 */
+export const MEMORY_TIMELINE_LEGACY = "memory_ontology.md";
+/** @deprecated 旧常量名，仅为外部引用兼容保留。 */
+export const MEMORY_ONTOLOGY = MEMORY_TIMELINE;
 export const KNOWLEDGE_ONTOLOGY = "knowledge_ontology.md";
 
-/** 结构化条目三型：event（事件=记忆本体）/ fact（事实=知识本体）/ rule（规则=规则本体）。
+/** 结构化条目三型：event（事件=记忆）/ fact（事实=知识本体）/ rule（规则=规则本体）。
  *  legacy 表示旧叙述条目（无 kind 标记，兼容渲染）。 */
 export const KINDS = ["event", "fact", "rule"];
 
@@ -257,8 +261,13 @@ export function createMemoryLayout(root, readText) {
   const coldFile = () => join(memoryRoot(), COLD);
   const episodicDir = () => join(memoryRoot(), EPISODIC_DIR);
   const journalDir = () => join(memoryRoot(), JOURNAL_DIR);
-  /** 三本体档案文件：记忆本体（事件时间线）/ 知识本体（精确值）。规则本体在 ontology.js（rules.md）。 */
-  const memoryOntologyFile = () => join(memoryRoot(), MEMORY_ONTOLOGY);
+  /** 本体档案与记忆文件：记忆（事件时间线）/ 知识本体（精确值）。规则本体在 ontology.js（rules.md）。 */
+  const memoryOntologyFile = () => {
+    const next = join(memoryRoot(), MEMORY_TIMELINE);
+    if (existsSync(next)) return next;
+    const legacy = join(memoryRoot(), MEMORY_TIMELINE_LEGACY);
+    return existsSync(legacy) ? legacy : next;
+  };
   const knowledgeOntologyFile = () => join(memoryRoot(), KNOWLEDGE_ONTOLOGY);
 
   const readFile = (file) => {
@@ -353,7 +362,7 @@ export function createMemoryLayout(root, readText) {
       return kept.join("\n");
     },
 
-    /** 注入用渲染：三本体档案（知识/规则/记忆）+ 冷储摘要 + 归档/序时账索引，截断到 maxChars。
+    /** 注入用渲染：本体档案与记忆（知识/规则/记忆）+ 冷储摘要 + 归档/序时账索引，截断到 maxChars。
      *  写侧协议 v1：本体档案（结构化可查视图）优先注入——知识本体（精确值）→ 规则本体（纪律）→
      *  事件时间线（时序）→ 冷储摘要（高抽象经验）；暖态近期记忆（warm）默认不进注入段
      *  （近期记忆由 memory_read 按需读取），仅当 opts.injectWarm === true 时追加。
@@ -374,7 +383,7 @@ export function createMemoryLayout(root, readText) {
       const rulesFile = join(memoryRoot(), "rules.md");
       const rulesText = readFile(rulesFile);
       if (rulesText.trim()) parts.push(`## 规则本体 / Rules\n${rulesText.trim()}`);
-      // 记忆本体（事件时间线，回答"什么时候/顺序"）
+      // 记忆（事件时间线，回答"什么时候/顺序"）
       const ontM = readFile(memoryOntologyFile());
       if (ontM.trim()) parts.push(`## 事件时间线 / Timeline\n${ontM.trim()}`);
       // 近期记忆默认不进注入段（高频高抽象优先；近期由 memory_read 按需读）

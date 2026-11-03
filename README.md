@@ -117,6 +117,11 @@ Both can be tuned under the `linghun.memory.assessment` / `linghun.memory.autoCo
   `soul:judgment` — no separate section, no `yanguan_audit` / `yanguan_review` tools, no CONFIRMED table.
   Reliability rests on domain rules (R-J series), not on a supervision layer
 - **v0.4.0**: LLM-distilled cold storage (checkpoint → episodic → knowledge with real summarization)
+- **v0.4.8** (current): **anchor discipline (`ANCHOR_DISCIPLINE`)** — when the assembled material
+  package (from `dsh-linghun-assembler` v0.4.5) carries the `【组装者语义锚点】` marker, the closer
+  must anchor its answer to the marked entry as the **only reliable anchor**, ignoring the other
+  candidates and unrelated memory. This completes the v053 semantic-anchor pipeline:
+  judge single-source anchor → cap length → hard-anchor prompt. No marker, no effect.
 - **v0.5.0**: dual-instance mutual verification (criteria source bound to the verifier)
 
 ## Design philosophy
