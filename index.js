@@ -24,6 +24,7 @@ import { defineTool } from "@deepseek-ai/dsh-tools";
 import { DEFAULT_IDENTITY, DEFAULT_JUDGMENT, DEFAULT_USER_CARD, MEMORY_DISCIPLINE, ANCHOR_DISCIPLINE, resolveIdentity } from "./identity.js";
 import { createMemoryLayout, parseWarm, renderWarmEntries, summarizeWarmForCold, touchWarmAccessText, findWarmEntryRef, replaceWarmEntryText, markWrongWarmEntryText, findNearDuplicateWarm } from "./memory.js";
 import { writeOntologySafe, appendRulesSafe } from "./ontology.js";
+import { toolError } from "./errorContract.js";
 
 const name = "linghun";
 const inject = ["systemPrompt", "tools"];
@@ -36,6 +37,17 @@ const SECTION_MEMORY = "soul:memory";
 const MEMORY_DIR = join("linghun", "memory");
 /** 用户人设文件：$DSH_HOME/linghun/identity.md —— 用户自己写人设的地方，文件优先。 */
 const IDENTITY_FILE = join("linghun", "identity.md");
+
+/** 写入阶段的文件系统异常 → 结构化工具错误：告诉模型这次失败没有副作用、能重试几次。 */
+const asWriteError = (tool, err) =>
+  toolError({
+    code: `${tool.toUpperCase()}_WRITE_FAILED`,
+    phase: "effect",
+    retryable: true,
+    effectState: "none",
+    nextAction: "重试一次；连续两次失败说明暖态文件不可写（磁盘或权限），向用户报告，不要继续重试",
+    message: `${tool}: 写入失败 — ${err?.message ?? err}`,
+  });
 
 /** 从灵魂卡文件文本解析「名字：xxx」；找不到返回 null。 */
 function parseName(text) {
@@ -639,7 +651,14 @@ function apply(ctx, config) {
     const conf = ["high", "medium", "low"].includes(opts.confidence) ? opts.confidence : "medium";
     const err = validateEntryFormat(kindNorm, content);
     if (err) {
-      throw new Error(`memory_append: ${err}`);
+      throw toolError({
+        code: "MEMORY_FORMAT_INVALID",
+        phase: "preflight",
+        retryable: true,
+        effectState: "none",
+        nextAction: "按 memory_append 要求的条目格式重写 content 后再调用；不要原样重试",
+        message: `memory_append: ${err}`,
+      });
     }
     const block = `\n## ${stamp} [${kindNorm}] ${conf}\n\n${content}\n<!-- last_access: ${stamp} -->\n`;
     const file = layout.warmFile();
@@ -692,7 +711,14 @@ function apply(ctx, config) {
       }
     }
     if (total > max) {
-      throw new Error(`memory_append: 记忆超过上限（${max} 字节），先执行 memory_consolidate 沉淀`);
+      throw toolError({
+        code: "MEMORY_LIMIT_EXCEEDED",
+        phase: "preflight",
+        retryable: true,
+        effectState: "none",
+        nextAction: "先调用 memory_consolidate 把暖态沉淀进冷储，再重试 memory_append",
+        message: `memory_append: 记忆超过上限（${max} 字节），先执行 memory_consolidate 沉淀`,
+      });
     }
     await ensureParent(file);
     await appendFile(file, block, "utf8");
@@ -772,11 +798,24 @@ function apply(ctx, config) {
     isConcurrencySafe: () => false,
     async execute(args, exec) {
       const content = String(args.content ?? "").trim();
-      if (!content) throw new Error("memory_append: `content` 不能为空");
+      if (!content) {
+        throw toolError({
+          code: "MEMORY_CONTENT_EMPTY",
+          phase: "preflight",
+          retryable: true,
+          effectState: "none",
+          nextAction: "补上要记的内容再调用 memory_append",
+          message: "memory_append: `content` 不能为空",
+        });
+      }
       const kind = String(args.kind ?? "fact").trim() || "fact";
       const confidence = String(args.confidence ?? "").trim();
       const update = String(args.update ?? "").trim() || undefined;
-      return appendMemoryBlock(content, kind, { confidence, update });
+      try {
+        return await appendMemoryBlock(content, kind, { confidence, update });
+      } catch (e) {
+        throw e?.code ? e : asWriteError("memory_append", e);
+      }
     },
     presentCall: (args) => ({ card: "generic", title: "海马体·记录", kind: "other", rawInput: args }),
   }));
@@ -995,7 +1034,16 @@ function apply(ctx, config) {
     isConcurrencySafe: () => false,
     async execute(args, exec) {
       const ref = String(args?.ref ?? "").trim();
-      if (!ref) throw new Error("memory_touch: `ref` 不能为空");
+      if (!ref) {
+        throw toolError({
+          code: "MEMORY_TOUCH_REF_EMPTY",
+          phase: "preflight",
+          retryable: true,
+          effectState: "none",
+          nextAction: "从 memory_read 返回的条目里取一个 ref 再调用 memory_touch",
+          message: "memory_touch: `ref` 不能为空",
+        });
+      }
       if (cfg().memory?.timeWeight === false) return { touched: 0 };
       try {
         const touched = await touchWarmAccess(ref);
@@ -1291,15 +1339,35 @@ function apply(ctx, config) {
     isConcurrencySafe: () => false,
     async execute(args, exec) {
       const content = String(args.content ?? "").trim();
-      if (!content) throw new Error("soul_update: `content` 不能为空");
+      if (!content) {
+        throw toolError({
+          code: "SOUL_CONTENT_EMPTY",
+          phase: "preflight",
+          retryable: true,
+          effectState: "none",
+          nextAction: "补上新的灵魂卡内容再调用 soul_update",
+          message: "soul_update: `content` 不能为空",
+        });
+      }
       const max = cfg().identity?.maxBytes ?? 64 * 1024;
       if (byteLen(content) > max) {
-        throw new Error(`soul_update: 内容超过上限（${max} 字节）`);
+        throw toolError({
+          code: "SOUL_LIMIT_EXCEEDED",
+          phase: "preflight",
+          retryable: true,
+          effectState: "none",
+          nextAction: `把灵魂卡压到 ${max} 字节以内再调用；先删重复表述，别删身份锚点和判断纪律`,
+          message: `soul_update: 内容超过上限（${max} 字节）`,
+        });
       }
       const file = identityFile();
       await ensureParent(file);
-      await writeFile(file, content.trimEnd() + "\n", "utf8");
-      fileCache.delete(file);
+      try {
+        await writeFile(file, content.trimEnd() + "\n", "utf8");
+        fileCache.delete(file);
+      } catch (e) {
+        throw e?.code ? e : asWriteError("soul_update", e);
+      }
       return { bytes: byteLen(content) };
     },
   }));
